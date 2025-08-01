@@ -1,0 +1,18 @@
+# Python cache files
+__pycache__/
+*.pyc
+
+# Generated output folders
+/2_Output_HTML/
+/3_Processed_Files/
+/5_Error_Files/
+
+# Log folders
+/6_Logs/
+/7_Detailed_Logs/
+
+# Temporary files folder
+/temp_output/
+
+# InDesign lock files
+*.idlk
