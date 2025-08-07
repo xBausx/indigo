@@ -59,32 +59,88 @@ def move_file_to_folder(source_path, dest_folder_path):
     except Exception as e:
         logging.error(f"Could not move file '{source.name}': {e}", exc_info=True)
 
-def verify_resize_output(output_subfolder_path):
+def verify_resize_output(indd_file_stem, config):
     """
-    Verifies that the resize script produced the correct output artifacts.
+    Verifies that the resize script produced the correct output artifacts in the
+    final output destination defined in the config.
     Returns True if valid, False otherwise.
     """
-    logging.info(f"Verifying artifacts in output folder: '{output_subfolder_path}'...")
+    # This function now constructs the final output path itself by reading from config.
+    # This ensures it is always looking in the correct, authoritative location.
+    try:
+        final_output_base_path = Path(config.get('Paths', 'final_flyers_output_folder'))
+        output_subfolder_path = final_output_base_path / indd_file_stem
+    except Exception as e:
+        logging.error(f"Could not construct final output path from config.ini: {e}")
+        return False
+
+    logging.info(f"Verifying artifacts in FINAL output folder: '{output_subfolder_path}'...")
     
-    # Convert to a Path object for easier handling
     folder_path = Path(output_subfolder_path)
 
     # Check 1: Does the main output folder itself exist?
     if not folder_path.is_dir():
-        logging.error(f"Validation failed: Output folder '{folder_path.name}' does not exist.")
+        logging.error(f"Validation failed: Final output folder '{folder_path.name}' does not exist at '{folder_path}'.")
         return False
 
     # Check 2: Does it contain the 'publication-web-resources' subfolder?
     resources_subfolder = folder_path / "publication-web-resources"
     if not resources_subfolder.is_dir():
-        logging.error(f"Validation failed: The 'publication-web-resources' subfolder is missing.")
+        logging.error(f"Validation failed: The 'publication-web-resources' subfolder is missing in '{folder_path}'.")
         return False
 
     # Check 3: Does the main folder contain at least one .html file?
-    # We use a generator expression for efficiency - it stops as soon as one is found.
+    # The merged JSX script creates <docName>.html, so this check remains valid.
     if not any(folder_path.glob("*.html")):
-        logging.error(f"Validation failed: No .html file was found in the main output folder.")
+        logging.error(f"Validation failed: No .html file was found in the main output folder '{folder_path}'.")
         return False
         
-    logging.info("Artifact validation successful. All expected files and folders are present.")
+    logging.info("Artifact validation successful. All expected files and folders are present in the final destination.")
     return True
+
+def recover_orphaned_files(temp_folder_path, input_folder_path):
+    """
+    Checks for any files stranded in the temp folder from a previous crash
+    and moves them back to the input folder to be re-queued.
+    """
+    logging.info("--- Checking for orphaned files from previous runs... ---")
+    temp_folder = Path(temp_folder_path)
+    input_folder = Path(input_folder_path)
+    
+    if not temp_folder.exists():
+        return # Nothing to do
+
+    orphaned_files = list(temp_folder.glob("*.indd"))
+    
+    if not orphaned_files:
+        logging.info("No orphaned files found. Startup is clean.")
+        return
+        
+    logging.warning(f"Found {len(orphaned_files)} orphaned file(s) in the temp folder. Moving them back to Input for reprocessing.")
+    
+    for orphan in orphaned_files:
+        try:
+            shutil.move(str(orphan), str(input_folder / orphan.name))
+        except Exception as e:
+            logging.error(f"Could not recover orphaned file '{orphan.name}': {e}")
+
+def cleanup_empty_temp_folder(temp_folder_path):
+    """
+    Deletes the temporary processing folder, but only if it is completely empty.
+    This is a safe cleanup routine to run on startup after recovery.
+    """
+    temp_folder = Path(temp_folder_path)
+    
+    # Check if the folder exists and is a directory
+    if temp_folder.is_dir():
+        # Check if the folder is empty. any(temp_folder.iterdir()) is an efficient way to do this.
+        if not any(temp_folder.iterdir()):
+            logging.info("Temporary processing folder is empty. Deleting it for a clean slate.")
+            try:
+                temp_folder.rmdir() # rmdir only works on empty directories, which is a safety feature.
+            except OSError as e:
+                logging.warning(f"Could not delete empty temp folder: {e}")
+        else:
+            # This is an important warning. It means recovery ran but something was left behind.
+            logging.warning("Temporary processing folder is NOT empty after recovery. Manual inspection may be required.")
+            

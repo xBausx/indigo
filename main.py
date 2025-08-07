@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import shutil
+import file_system
 
 try:
     from flask import Flask, jsonify, request
@@ -20,7 +21,7 @@ job_queue = Queue()
 folder_scan_lock = threading.Lock()
 config = configparser.ConfigParser()
 
-# --- NEW: Shared Status Object and Lock ---
+# ---  Shared Status Object and Lock ---
 # This dictionary will be shared between the API thread and the worker thread.
 status_info = {
     "status": "idle",
@@ -45,7 +46,7 @@ def worker_thread():
         file_to_process = job_queue.get()
         if file_to_process is None: break
 
-        # --- NEW: Update status before processing ---
+        # ---  Update status before processing ---
         with status_lock:
             status_info["status"] = "processing"
             status_info["current_file"] = str(file_to_process)
@@ -69,7 +70,7 @@ def worker_thread():
             logging.error(f"[WORKER] - A critical error occurred while running subprocess: {e}", exc_info=True)
 
         finally:
-            # --- NEW: Update status after processing is complete ---
+            # ---  Update status after processing is complete ---
             with status_lock:
                 status_info["status"] = "idle"
                 status_info["current_file"] = None
@@ -137,16 +138,56 @@ def get_status():
 
 # --- APPLICATION ENTRY POINT ---
 if __name__ == '__main__':
+    # We need this handler for daily log rotation
+    import logging.handlers
+
     project_root = Path().resolve()
     config.read(project_root / 'config.ini')
 
+    # --- Professional, Rotated Logging Setup ---
     log_folder = project_root / config.get('Paths', 'log_folder')
     log_folder.mkdir(exist_ok=True)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] [%(threadName)s] - %(message)s", handlers=[logging.FileHandler(log_folder / "main_listener.log"), logging.StreamHandler()])
+    
+    # The base name for our log file. The date will be added automatically.
+    log_file_path = log_folder / "main_listener.log"
 
+    # 1. Create the handler that rotates files daily at midnight.
+    # It will keep the last 30 log files as backups.
+    handler = logging.handlers.TimedRotatingFileHandler(
+        log_file_path, 
+        when='midnight', 
+        interval=1, 
+        backupCount=30
+    )
+    
+    # 2. Create a formatter using your exact, proven format string.
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] [%(threadName)s] - %(message)s")
+    handler.setFormatter(formatter)
+
+    # 3. Get the root logger, set its level, and add our new handler.
+    # This replaces the old basicConfig call.
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    
+    # 4. Also add a handler to continue printing logs to the console.
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+
+    # --- Self-Healing Startup Recovery ---
+    input_folder = project_root / config.get('Paths', 'input_folder')
+    temp_processing_folder = project_root / "temp_processing"
+    file_system.recover_orphaned_files(temp_processing_folder, input_folder)
+    
+    # --- CLean up the temp folder ---
+    file_system.cleanup_empty_temp_folder(temp_processing_folder)
+
+    # Start the background worker thread
     worker = threading.Thread(target=worker_thread, name="WorkerThread")
     worker.daemon = True
     worker.start()
 
+    # Start the Flask web server
     logging.info("Starting Flask API server. Listening on http://0.0.0.0:5000")
     app.run(host='0.0.0.0', port=5000)

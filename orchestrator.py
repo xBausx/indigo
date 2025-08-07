@@ -8,7 +8,7 @@ import sys
 # Import our custom libraries
 import file_system
 import indesign_ui
-import api_client # <-- NEW: Import our API client
+import api_client # <--  Import our API client
 
 def setup_logging_for_file(config, log_file_name):
     """Sets up logging to a specific file in the detailed_logs folder."""
@@ -50,8 +50,11 @@ def main():
     
     processed_folder = project_root / config.get('Paths', 'processed_folder')
     error_folder = project_root / config.get('Paths', 'error_folder')
-    # --- ADDED: Get the output folder path for the callback ---
-    output_folder = project_root / config.get('Paths', 'output_folder')
+    
+    # --- MODIFIED: Read the NEW final output path for the callback/verification ---
+    # This is an absolute path defined in config.ini, so no project_root is needed.
+    final_output_base_path = Path(config.get('Paths', 'final_flyers_output_folder'))
+
     max_retries = config.getint('Settings', 'max_retries')
     retry_delay = config.getint('Settings', 'retry_delay_seconds')
 
@@ -59,7 +62,7 @@ def main():
     logging.info(f"Indigo Worker started for file: {indd_file_path.name}")
     
     try:
-        # --- STAGE 1: HTML EXPORT ---
+        # --- STAGE 1: HTML EXPORT (No changes here, uses intermediate folder) ---
         export_successful = False
         for attempt in range(max_retries):
             logging.info(f"HTML Export - Attempt {attempt + 1} of {max_retries}...")
@@ -80,12 +83,14 @@ def main():
             processed_subfolder = file_system.setup_processed_subfolder(indd_file_path, processed_folder)
             file_system.move_file_to_folder(indd_file_path, processed_subfolder)
             
+            # This function now triggers the JSX that writes to the new final_flyers_output_folder
             if indesign_ui.run_resize_on_folder(processed_subfolder, config):
                 logging.info(f"Successfully processed and resized {indd_file_path.name}.")
                 
-                # --- NEW: Send the final completion callback ---
+                # --- MODIFIED: Use the NEW final path for the API callback ---
                 logging.info("Attempting to send completion callback...")
-                final_output_folder_path = output_folder / indd_file_path.stem
+                final_output_folder_path = final_output_base_path / indd_file_path.stem
+                
                 if api_client.send_completion_callback(final_output_folder_path, config):
                     logging.info(f"[SUMMARY] Process complete for {indd_file_path.name}. Callback successful.")
                 else:
@@ -107,10 +112,10 @@ def main():
 
     logging.info("Indigo Worker finished successfully.")
     logging.info("==========================================================")
-
+    
 if __name__ == "__main__":
     try:
-        # --- NEW: Added 'requests' to the dependency check ---
+        # --- Added 'requests' to the dependency check ---
         import pyautogui, pywinauto, pyperclip, requests
         main()
     except ImportError:

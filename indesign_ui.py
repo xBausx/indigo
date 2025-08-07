@@ -131,7 +131,9 @@ def export_html_via_ui(indd_path, config):
                     break
             if html_options_dialog: break
             time.sleep(0.5)
+            
         time.sleep(15)
+        
         if html_options_dialog:
             html_options_dialog.set_focus()
             if not find_and_click_image(EXPORT_IMAGE, confidence=0.8, description="Export button"):
@@ -140,15 +142,21 @@ def export_html_via_ui(indd_path, config):
         time.sleep(process_wait)
         try:
             app.window(title="Export HTML5 package warning(s)").wait('visible', timeout=20).type_keys("{ENTER}")
-            time.sleep(10)
         except Exception: pass
+        
         time.sleep(process_wait)
+        
         try:
             Desktop(backend="win32").window(title_re=f"^{indd_path.stem}.*", class_name="CabinetWClass").wait('visible', timeout=15).close()
-        except Exception: pass
+        except Exception: 
+            pass
+        
         app.kill()
+        
         time.sleep(3)
+        
         return True
+    
     except Exception as e:
         logging.error(f"An error occurred during the InDesign UI workflow: {e}", exc_info=True)
         if app and app.is_process_running(): app.kill()
@@ -157,20 +165,19 @@ def export_html_via_ui(indd_path, config):
 def run_resize_on_folder(target_folder_path, config):
     """
     Launches a clean InDesign instance and runs the resize script.
-    This version uses a resilient VISUAL check for the completion signal.
+    This version uses a resilient VISUAL check for the completion signal
+    and calls the updated artifact verification method.
     """
     project_root = Path().resolve()
     scripts_folder = project_root / config.get('Paths', 'scripts_folder')
     indesign_executable = config.get('Paths', 'indesign_executable')
     indesign_version_folder = config.get('Paths', 'indesign_version_folder')
     images_root = project_root / config.get('Paths', 'image_assets_folder')
-    output_folder_root = project_root / config.get('Paths', 'output_folder')
     
     CANCEL_RECOVER_BUTTON = str(images_root / config.get('ImageFiles', 'cancel_recover_button'))
     NO_BUTTON = str(images_root / config.get('ImageFiles', 'no_button'))
     USER_SCRIPTS_FOLDER = str(images_root / config.get('ImageFiles', 'user_scripts_folder'))
     RESIZE_ALL_SCRIPT = str(images_root / config.get('ImageFiles', 'resize_all_script'))
-    # --- ADDED: Get the path for the signal's OK button ---
     SIGNAL_OK_BUTTON = str(images_root / config.get('ImageFiles', 'signal_ok_button'))
     
     initial_launch_wait = config.getint('Settings', 'initial_launch_wait')
@@ -179,7 +186,7 @@ def run_resize_on_folder(target_folder_path, config):
     
     logging.info(f"--- Starting Resize Process for folder: {target_folder_path} ---")
     
-    source_script_path = scripts_folder / "resizeall.js"
+    source_script_path = scripts_folder / "resizeall.jsx" # <-- Note the .jsx extension
     dest_script_path = None
     app = None
     
@@ -235,27 +242,27 @@ def run_resize_on_folder(target_folder_path, config):
         pyperclip.copy(input_folder_for_resize)
         choose_folder_dialog.type_keys("^v{ENTER}")
 
-        # --- FIX: Replaced the failing pywinauto logic with your proven visual method ---
         logging.info("Resize script is now running. Waiting for visual completion signal...")
         
         start_time = time.time()
         signal_found = False
         while time.time() - start_time < process_timeout:
-            # We use our helper function to repeatedly look for the OK button on the alert.
             if find_and_click_image(SIGNAL_OK_BUTTON, confidence=0.9, retries=1, description="completion signal OK button"):
                 signal_found = True
-                break # Exit the while loop
-            time.sleep(5) # Wait 5 seconds before checking the screen again
+                break
+            time.sleep(5)
 
         if not signal_found:
             raise RuntimeError("Timeout waiting for the visual completion signal alert.")
         
-        # --- Artifact Validation ---
-        output_subfolder_to_verify = output_folder_root / target_folder_path.name
-        is_valid = file_system.verify_resize_output(output_subfolder_to_verify)
+        # --- MODIFIED: Artifact Validation ---
+        # We now call the updated verification function, passing the document stem and config.
+        # It will construct the final path itself, ensuring it checks the correct destination.
+        indd_stem = target_folder_path.name
+        is_valid = file_system.verify_resize_output(indd_stem, config)
         
         if is_valid:
-            logging.info(f"--- Resize Process and Verification Successful for folder: {target_folder_path} ---")
+            logging.info(f"--- Resize Process and Verification Successful for folder: {target_folder_path.name} ---")
             return True
         else:
             raise RuntimeError(f"Artifact validation failed for folder: {target_folder_path.name}")
@@ -268,7 +275,7 @@ def run_resize_on_folder(target_folder_path, config):
             app.kill()
         if dest_script_path and dest_script_path.exists():
             try: dest_script_path.unlink()
-            except OSError as e: logging.warning(f"Could not delete script: {e}")      
+            except OSError as e: logging.warning(f"Could not delete script: {e}")
             
-            
+                    
             
