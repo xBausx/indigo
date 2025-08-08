@@ -255,7 +255,7 @@ def run_resize_on_folder(target_folder_path, config):
         if not signal_found:
             raise RuntimeError("Timeout waiting for the visual completion signal alert.")
         
-        # --- MODIFIED: Artifact Validation ---
+        # --- Artifact Validation ---
         # We now call the updated verification function, passing the document stem and config.
         # It will construct the final path itself, ensuring it checks the correct destination.
         indd_stem = target_folder_path.name

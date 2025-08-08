@@ -35,7 +35,7 @@ status_lock = threading.Lock()
 def worker_thread():
     """
     This function runs in the background. It watches the job_queue and
-    launches the orchestrator subprocess for each file.
+    launches the orchestrator subprocess for each job tuple (path, requestId).
     """
     project_root = Path().resolve()
     orchestrator_script_path = project_root / 'orchestrator.py'
@@ -43,82 +43,97 @@ def worker_thread():
     logging.info("Worker thread started. Waiting for jobs...")
 
     while True:
-        file_to_process = job_queue.get()
-        if file_to_process is None: break
+        # The queue now contains a tuple: (path_to_file, request_id)
+        job_item = job_queue.get()
+        if job_item is None: break
+
+        file_to_process, request_id = job_item
 
         # ---  Update status before processing ---
         with status_lock:
             status_info["status"] = "processing"
-            status_info["current_file"] = str(file_to_process)
+            status_info["current_file"] = str(file_to_process.name)
+            status_info["current_request_id"] = request_id # Add request ID to status
         
-        logging.info(f"[WORKER] - Picked up job: {file_to_process.name}")
+        logging.info(f"[WORKER] - Picked up job for: {file_to_process.name} with Request ID: {request_id}")
         
         try:
+            # --- Pass the requestId as a second argument to the orchestrator ---
             process = subprocess.run(
-                [sys.executable, str(orchestrator_script_path), str(file_to_process)],
+                [sys.executable, str(orchestrator_script_path), str(file_to_process), request_id],
                 capture_output=True,
                 text=True,
                 check=True
             )
-            logging.info(f"[WORKER] - Subprocess for '{file_to_process.name}' completed successfully.")
+            logging.info(f"[WORKER] - Subprocess for '{file_to_process.name}' (ID: {request_id}) completed successfully.")
 
         except subprocess.CalledProcessError as e:
-            logging.error(f"[WORKER] - Subprocess for '{file_to_process.name}' FAILED.")
+            logging.error(f"[WORKER] - Subprocess for '{file_to_process.name}' (ID: {request_id}) FAILED.")
             logging.error(f"[WORKER] - Output:\n{e.stderr}")
         
         except Exception as e:
-            logging.error(f"[WORKER] - A critical error occurred while running subprocess: {e}", exc_info=True)
+            logging.error(f"[WORKER] - A critical error occurred while running subprocess for ID {request_id}: {e}", exc_info=True)
 
         finally:
             # ---  Update status after processing is complete ---
             with status_lock:
                 status_info["status"] = "idle"
                 status_info["current_file"] = None
+                status_info["current_request_id"] = None # Clear request ID
             
             job_queue.task_done()
-
+            
 # --- THE FLASK API (THE "PRODUCER") ---
 app = Flask(__name__)
 
-@app.route('/run-process', methods=['POST'])
-def run_process():
+@app.route('/run-indigo-process', methods=['POST']) # Renamed endpoint for clarity
+def run_indigo_process():
     """
-    API endpoint to scan for files, claim them, and add them to the queue.
+    API endpoint that accepts a specific filename and requestId,
+    claims the file, and adds it to the processing queue.
     """
     project_root = Path().resolve()
     input_folder = project_root / config.get('Paths', 'input_folder')
     temp_processing_folder = project_root / "temp_processing"
     temp_processing_folder.mkdir(exist_ok=True)
 
-    if not folder_scan_lock.acquire(blocking=False):
-        return jsonify({"status": "error", "message": "A process is already scanning the input folder."}), 429
+    # 1. Get and validate the JSON payload from the request
+    data = request.get_json()
+    if not data or 'requestId' not in data or 'filename' not in data:
+        return jsonify({"status": "error", "message": "Invalid request body. 'requestId' and 'filename' are required."}), 400
+    
+    request_id = data['requestId']
+    # Sanitize filename to prevent directory traversal attacks
+    filename = Path(data['filename']).name
+    
+    logging.info(f"[API] - Received job request for file: '{filename}' with Request ID: {request_id}")
 
+    # 2. Check if the requested file actually exists in the input folder
+    source_file_path = input_folder / filename
+    if not source_file_path.is_file():
+        logging.warning(f"[API] - Requested file not found: {source_file_path}")
+        return jsonify({"requestId": request_id, "status": "error", "message": "File not found in input directory."}), 404
+
+    # 3. Claim the file by moving it to the temporary processing directory
     try:
-        logging.info("[API] - /run-process endpoint called.")
-        indd_files = list(input_folder.glob("*.indd"))
-        if not indd_files:
-            return jsonify({"status": "success", "message": "No new files found to process.", "files_queued": 0})
+        dest_path = temp_processing_folder / filename
+        shutil.move(str(source_file_path), str(dest_path))
+        logging.info(f"[API] - Claimed file '{filename}' and moved to temp folder.")
+    except Exception as e:
+        logging.error(f"[API] - Could not claim file '{filename}': {e}")
+        return jsonify({"requestId": request_id, "status": "error", "message": "Failed to move file for processing."}), 500
+    
+    # 4. Add the job (as a tuple) to the queue
+    job_item = (dest_path, request_id)
+    job_queue.put(job_item)
+    logging.info(f"[API] - Queued job for: {filename} with Request ID: {request_id}")
 
-        claimed_files = []
-        for indd_file in indd_files:
-            try:
-                dest_path = temp_processing_folder / indd_file.name
-                shutil.move(str(indd_file), str(dest_path))
-                claimed_files.append(dest_path)
-            except Exception as e:
-                logging.error(f"[API] - Could not claim file '{indd_file.name}': {e}")
-        
-        for claimed_file in claimed_files:
-            job_queue.put(claimed_file)
-            logging.info(f"[API] - Queued job for: {claimed_file.name}")
-
-        return jsonify({
-            "status": "success",
-            "message": f"Successfully queued {len(claimed_files)} files for processing.",
-            "files_queued": len(claimed_files)
-        })
-    finally:
-        folder_scan_lock.release()
+    # 5. Return an immediate success response
+    return jsonify({
+        "requestId": request_id,
+        "filename": filename,
+        "status": "queued"
+    }), 200
 
 # --- The Status Endpoint ---
 @app.route('/status', methods=['GET'])

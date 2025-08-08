@@ -10,17 +10,23 @@ import file_system
 import indesign_ui
 import api_client # <--  Import our API client
 
-def setup_logging_for_file(config, log_file_name):
-    """Sets up logging to a specific file in the detailed_logs folder."""
+def setup_logging_for_file(config, log_file_name, request_id):
+    """
+    Sets up logging to a specific file named with the request_id and filename
+    in the detailed_logs folder.
+    """
     project_root = Path().resolve()
-    log_folder = project_root / config.get('Paths', 'log_folder')
     detailed_log_folder = project_root / config.get('Paths', 'detailed_log_folder')
-    
-    log_folder.mkdir(exist_ok=True)
     detailed_log_folder.mkdir(exist_ok=True)
     
-    file_log_path = detailed_log_folder / f"{log_file_name}.log"
+    # --- Log filename now includes the request_id for easy lookup ---
+    log_file_name_with_id = f"{request_id}_{log_file_name}.log"
+    file_log_path = detailed_log_folder / log_file_name_with_id
     
+    # --- Ensure any existing handlers are removed for a clean setup ---
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+        
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] - %(message)s",
@@ -29,43 +35,45 @@ def setup_logging_for_file(config, log_file_name):
             logging.StreamHandler()
         ]
     )
-    logging.info(f"Logging for this run will be in: {file_log_path}")
+    logging.info(f"Logging for Request ID {request_id} will be in: {file_log_path}")
+
 
 def main():
     """
     This script is a single-file worker. It processes one InDesign file
-    passed as a command-line argument.
+    and uses a requestId for end-to-end traceability.
     """
-    if len(sys.argv) < 2:
-        print("FATAL ERROR: No InDesign file path was provided.")
+    # --- Now expects two arguments: file path and requestId ---
+    if len(sys.argv) < 3:
+        print("FATAL ERROR: InDesign file path and requestId were not provided.")
         sys.exit(1)
         
     indd_file_path = Path(sys.argv[1])
+    request_id = sys.argv[2]
     
     project_root = Path().resolve()
     config = configparser.ConfigParser()
     config.read(project_root / 'config.ini')
 
-    setup_logging_for_file(config, indd_file_path.stem)
+    # --- Pass requestId to the logging setup ---
+    setup_logging_for_file(config, indd_file_path.stem, request_id)
+    
+    # --- All subsequent log messages will be manually tagged with the Request ID ---
     
     processed_folder = project_root / config.get('Paths', 'processed_folder')
     error_folder = project_root / config.get('Paths', 'error_folder')
-    
-    # --- MODIFIED: Read the NEW final output path for the callback/verification ---
-    # This is an absolute path defined in config.ini, so no project_root is needed.
     final_output_base_path = Path(config.get('Paths', 'final_flyers_output_folder'))
-
     max_retries = config.getint('Settings', 'max_retries')
     retry_delay = config.getint('Settings', 'retry_delay_seconds')
 
     logging.info("==========================================================")
-    logging.info(f"Indigo Worker started for file: {indd_file_path.name}")
+    logging.info(f"[ReqID: {request_id}] Indigo Worker started for file: {indd_file_path.name}")
     
     try:
-        # --- STAGE 1: HTML EXPORT (No changes here, uses intermediate folder) ---
+        # --- STAGE 1: HTML EXPORT ---
         export_successful = False
         for attempt in range(max_retries):
-            logging.info(f"HTML Export - Attempt {attempt + 1} of {max_retries}...")
+            logging.info(f"[ReqID: {request_id}] HTML Export - Attempt {attempt + 1} of {max_retries}...")
             try:
                 file_system.clear_indesign_cache()
                 if indesign_ui.export_html_via_ui(indd_file_path, config):
@@ -74,7 +82,7 @@ def main():
                 else:
                     raise RuntimeError("export_html_via_ui returned False.")
             except Exception:
-                logging.error(f"FAILURE: HTML Export attempt {attempt + 1} failed.", exc_info=True)
+                logging.error(f"[ReqID: {request_id}] FAILURE: HTML Export attempt {attempt + 1} failed.", exc_info=True)
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
 
@@ -83,34 +91,33 @@ def main():
             processed_subfolder = file_system.setup_processed_subfolder(indd_file_path, processed_folder)
             file_system.move_file_to_folder(indd_file_path, processed_subfolder)
             
-            # This function now triggers the JSX that writes to the new final_flyers_output_folder
             if indesign_ui.run_resize_on_folder(processed_subfolder, config):
-                logging.info(f"Successfully processed and resized {indd_file_path.name}.")
+                logging.info(f"[ReqID: {request_id}] Successfully processed and resized {indd_file_path.name}.")
                 
-                # --- MODIFIED: Use the NEW final path for the API callback ---
-                logging.info("Attempting to send completion callback...")
+                logging.info(f"[ReqID: {request_id}] Attempting to send completion callback...")
                 final_output_folder_path = final_output_base_path / indd_file_path.stem
                 
-                if api_client.send_completion_callback(final_output_folder_path, config):
-                    logging.info(f"[SUMMARY] Process complete for {indd_file_path.name}. Callback successful.")
+                # --- Pass the filename to the API client callback ---
+                if api_client.send_completion_callback(final_output_folder_path, request_id, indd_file_path.name, config):
+                    logging.info(f"[SUMMARY] [ReqID: {request_id}] Process complete for {indd_file_path.name}. Callback successful.")
                 else:
-                    logging.warning(f"[SUMMARY] Process complete for {indd_file_path.name}, but the final API callback FAILED.")
+                    logging.warning(f"[SUMMARY] [ReqID: {request_id}] Process complete for {indd_file_path.name}, but the final API callback FAILED.")
 
             else:
-                logging.error(f"Resize process failed for '{indd_file_path.name}'. Moving its folder to Errors.")
+                logging.error(f"[ReqID: {request_id}] Resize process failed for '{indd_file_path.name}'. Moving its folder to Errors.")
                 file_system.move_file_to_folder(processed_subfolder, error_folder)
                 sys.exit(1)
         else:
-            logging.error(f"All HTML export attempts failed for '{indd_file_path.name}'.")
+            logging.error(f"[ReqID: {request_id}] All HTML export attempts failed for '{indd_file_path.name}'.")
             file_system.move_file_to_folder(indd_file_path, error_folder)
             sys.exit(1)
 
     except Exception as e:
-        logging.error(f"A critical, unhandled error occurred: {e}", exc_info=True)
+        logging.error(f"[ReqID: {request_id}] A critical, unhandled error occurred: {e}", exc_info=True)
         file_system.move_file_to_folder(indd_file_path, error_folder)
         sys.exit(1)
 
-    logging.info("Indigo Worker finished successfully.")
+    logging.info(f"Indigo Worker finished successfully for Request ID: {request_id}.")
     logging.info("==========================================================")
     
 if __name__ == "__main__":
