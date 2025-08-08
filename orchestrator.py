@@ -97,9 +97,12 @@ def main():
                 logging.info(f"[ReqID: {request_id}] Attempting to send completion callback...")
                 final_output_folder_path = final_output_base_path / indd_file_path.stem
                 
-                # --- Pass the filename to the API client callback ---
                 if api_client.send_completion_callback(final_output_folder_path, request_id, indd_file_path.name, config):
                     logging.info(f"[SUMMARY] [ReqID: {request_id}] Process complete for {indd_file_path.name}. Callback successful.")
+                    
+                    # --- NEW: Cleanup the intermediate output folder now that we are completely finished ---
+                    file_system.cleanup_intermediate_folder(indd_file_path.stem, request_id, config)
+
                 else:
                     logging.warning(f"[SUMMARY] [ReqID: {request_id}] Process complete for {indd_file_path.name}, but the final API callback FAILED.")
 
@@ -114,12 +117,17 @@ def main():
 
     except Exception as e:
         logging.error(f"[ReqID: {request_id}] A critical, unhandled error occurred: {e}", exc_info=True)
-        file_system.move_file_to_folder(indd_file_path, error_folder)
+        # Attempt to move the source file to error if it's still in the temp folder
+        if indd_file_path.exists():
+            file_system.move_file_to_folder(indd_file_path, error_folder)
+        # If the file was already moved to processed, move that folder to error
+        elif 'processed_subfolder' in locals() and processed_subfolder.exists():
+            file_system.move_file_to_folder(processed_subfolder, error_folder)
         sys.exit(1)
 
     logging.info(f"Indigo Worker finished successfully for Request ID: {request_id}.")
     logging.info("==========================================================")
-    
+
 if __name__ == "__main__":
     try:
         # --- Added 'requests' to the dependency check ---

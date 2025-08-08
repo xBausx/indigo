@@ -9,8 +9,6 @@ var exportedImages = []; // Global array to store info for the HTML gallery.
 
 // --- MAIN FUNCTION ---
 function runSequentialBatchExport() {
-    // The source folder is now managed by the orchestrator, which places files in a temp directory.
-    // For manual testing, we still allow folder selection. The Python script will pass the folder path.
     var sourceFolder = Folder.selectDialog("Select the folder containing your InDesign files");
     if (sourceFolder === null) return;
 
@@ -19,7 +17,6 @@ function runSequentialBatchExport() {
 
     var inddFiles = sourceFolder.getFiles("*.indd");
     if (inddFiles.length === 0) {
-        // Signal completion for the orchestrator even if there's nothing to do.
         alert("INDIGO_RESIZE_COMPLETE");
         return;
     }
@@ -31,32 +28,35 @@ function runSequentialBatchExport() {
             doc = app.open(inddFile, false);
             var docName = doc.name.replace(/\.indd$/i, "");
 
-            // Use the centralized output path structure
             var mainExportFolder = new Folder(outputRootFolder.fsName + "/" + docName);
             if (!mainExportFolder.exists) mainExportFolder.create();
 
             var imageSubfolder = new Folder(mainExportFolder.fsName + "/publication-web-resources/image");
             if (!imageSubfolder.exists) imageSubfolder.create();
 
-            // Export assets and collect info for the gallery
             exportHighResAssets(doc, imageSubfolder, docName);
-            
-            // Export the full InDesign HTML package (Your proven logic)
             exportDocumentAsHighResHTML(doc, mainExportFolder);
 
         } catch (e) {
-            $.writeln("ERROR processing " + inddFile.name + ": " + e.message);
+            // Instead of failing silently, we now display a loud, blocking alert
+            // with the actual error message from InDesign. This will stop the
+            // script and prevent a false success signal.
+            alert("FATAL SCRIPT ERROR processing '" + inddFile.name + "':\n\n" + e.message);
+            
+            // We must explicitly stop the function here.
+            if (doc !== null) { doc.close(SaveOptions.NO); }
+            return; 
+
         } finally {
-            if (doc !== null) {
+            if (doc !== null && doc.isValid) {
                 doc.close(SaveOptions.NO);
             }
         }
     }
     
-    // After processing all files, generate the supplementary HTML galleries
     generateHTMLIndex();
 
-    // The critical completion signal for our Python automation script
+    // This alert will now ONLY be reached if every single file succeeds.
     alert("INDIGO_RESIZE_COMPLETE");
 }
 

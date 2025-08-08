@@ -144,3 +144,26 @@ def cleanup_empty_temp_folder(temp_folder_path):
             # This is an important warning. It means recovery ran but something was left behind.
             logging.warning("Temporary processing folder is NOT empty after recovery. Manual inspection may be required.")
             
+def cleanup_intermediate_folder(indd_file_stem, request_id, config):
+    """
+    Deletes the intermediate output folder created during the initial HTML export.
+    This is a cleanup step to run after the final output is verified.
+    """
+    logging.info(f"[ReqID: {request_id}] Starting cleanup of intermediate output folder...")
+    try:
+        project_root = Path().resolve()
+        # The 'output_folder' from config points to the intermediate directory (e.g., '2_Output_HTML')
+        intermediate_output_root = project_root / config.get('Paths', 'output_folder')
+        folder_to_delete = intermediate_output_root / indd_file_stem
+
+        if folder_to_delete.is_dir():
+            logging.info(f"[ReqID: {request_id}] Deleting temporary folder: {folder_to_delete}")
+            shutil.rmtree(folder_to_delete)
+            logging.info(f"[ReqID: {request_id}] Successfully cleaned up intermediate folder.")
+        else:
+            logging.info(f"[ReqID: {request_id}] Intermediate folder not found, skipping cleanup: {folder_to_delete}")
+
+    except Exception as e:
+        # We log this as a warning because the primary job succeeded.
+        # Cleanup failure should not cause the entire process to be marked as an error.
+        logging.warning(f"[ReqID: {request_id}] An error occurred during intermediate folder cleanup: {e}", exc_info=True)
