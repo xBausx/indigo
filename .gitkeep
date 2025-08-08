@@ -1,0 +1,8 @@
+# Create a .gitkeep file in 1_Input_Files if it's empty
+touch 1_Input_Files/.gitkeep
+
+# Create a .gitkeep file in 2_Output_HTML if it's empty
+touch 2_Output_HTML/.gitkeep
+
+# Create a .gitkeep file in 3_Processed_Files if it's empty
+touch 3_Processed_Files/.gitkeep
