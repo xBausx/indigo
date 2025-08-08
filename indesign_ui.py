@@ -16,7 +16,10 @@ except ImportError:
     pass
 
 # --- HELPER FUNCTIONS  ---
-def find_and_click_image(image_path, confidence=0.9, retries=2, delay_seconds=10, description="image"):
+def find_and_click_image(image_path, confidence=0.9, retries=5, delay_seconds=5, description="image"):
+    """
+    Looks for an image on screen and clicks it.
+    """
     for attempt in range(retries):
         logging.info(f"Searching for {description}, attempt {attempt + 1} of {retries}...")
         try:
@@ -25,11 +28,14 @@ def find_and_click_image(image_path, confidence=0.9, retries=2, delay_seconds=10
                 pyautogui.click(location)
                 logging.info(f"Successfully found and clicked {description}.")
                 return True
-        except Exception:
-            pass
+        except Exception as e:
+            # PyAutoGUI can raise a specific exception if Pillow is not configured for screenshots
+            logging.warning(f"An exception occurred while searching for {description}: {e}")
+
         if attempt < retries - 1:
             logging.info(f"{description.capitalize()} not found. Retrying in {delay_seconds} seconds...")
             time.sleep(delay_seconds)
+            
     logging.warning(f"Could not find {description} after {retries} attempts.")
     return False
 
@@ -40,38 +46,15 @@ def handle_opening_dialogs(app, config):
     images_root = project_root / config.get('Paths', 'image_assets_folder')
     OK_BUTTON = str(images_root / config.get('ImageFiles', 'ok_button'))
     SKIP_FONTS_BUTTON = str(images_root / config.get('ImageFiles', 'skip_fonts_button'))
-    num_retries = 2
-    retry_delay_seconds = 10
+
     logging.info("UI Automation: Watching for 'Missing Links' dialog...")
-    for attempt in range(num_retries):
-        logging.info(f"Searching for 'OK' button, attempt {attempt + 1} of {num_retries}...")
-        try:
-            button_location = pyautogui.locateCenterOnScreen(OK_BUTTON, confidence=0.9)
-            if button_location:
-                pyautogui.click(button_location)
-                logging.info("UI Automation: Handled 'Missing Links' dialog successfully.")
-                break
-        except Exception:
-            if attempt < num_retries - 1:
-                logging.info(f"Button not found. Retrying in {retry_delay_seconds} seconds...")
-                time.sleep(retry_delay_seconds)
-            else:
-                logging.info("UI Automation: 'Missing Links' dialog did not appear after all attempts.")
+    # This now uses the new default of 5 retries, 5 seconds.
+    find_and_click_image(OK_BUTTON, confidence=0.9, description="'Missing Links' OK button")
+
     logging.info("UI Automation: Watching for 'Missing Fonts' dialog...")
-    for attempt in range(num_retries):
-        logging.info(f"Searching for 'Skip' button, attempt {attempt + 1} of {num_retries}...")
-        try:
-            button_location = pyautogui.locateCenterOnScreen(SKIP_FONTS_BUTTON, confidence=0.9)
-            if button_location:
-                pyautogui.click(button_location)
-                logging.info("UI Automation: Handled 'Missing Fonts' dialog successfully.")
-                break
-        except Exception:
-            if attempt < num_retries - 1:
-                logging.info(f"Button not found. Retrying in {retry_delay_seconds} seconds...")
-                time.sleep(retry_delay_seconds)
-            else:
-                logging.info("UI Automation: 'Missing Fonts' dialog did not appear after all attempts.")
+    # This also uses the new default of 5 retries, 5 seconds.
+    find_and_click_image(SKIP_FONTS_BUTTON, confidence=0.9, description="'Missing Fonts' Skip button")
+    
     logging.info("UI Automation: Initial dialog handling complete.")
 
 def export_html_via_ui(indd_path, config):
@@ -103,10 +86,15 @@ def export_html_via_ui(indd_path, config):
         # This is your proven, working UI automation logic.
         command_line = f'"{config.get("Paths", "indesign_executable")}" "{indd_path}"'
         app = Application(backend="win32").start(command_line)
+        
         time.sleep(initial_launch_wait)
-        find_and_click_image(CANCEL_RECOVER_BUTTON, confidence=0.9, retries=1, description="Cancel Recovery button")
+        
+        # This now uses the new default of 5 retries, 5 seconds.
+        find_and_click_image(CANCEL_RECOVER_BUTTON, confidence=0.9, description="Cancel Recovery button")
+        
         time.sleep(inter_action_wait)
         handle_opening_dialogs(app, config)
+        
         main_window = app.window(title_re=f".*{indd_path.name}.*").wait('visible', timeout=30)
         main_window.set_focus()
         main_window.type_keys("^e")
@@ -136,6 +124,7 @@ def export_html_via_ui(indd_path, config):
         
         if html_options_dialog:
             html_options_dialog.set_focus()
+            # This now uses the new default of 5 retries, 5 seconds.
             if not find_and_click_image(EXPORT_IMAGE, confidence=0.8, description="Export button"):
                 html_options_dialog.type_keys("{TAB 6}{ENTER}")
         else: raise RuntimeError("Export HTML5 Package dialog not found.")
@@ -186,7 +175,7 @@ def run_resize_on_folder(target_folder_path, config):
     
     logging.info(f"--- Starting Resize Process for folder: {target_folder_path} ---")
     
-    source_script_path = scripts_folder / "resizeall.jsx" # <-- Note the .jsx extension
+    source_script_path = scripts_folder / "resizeall.js" 
     dest_script_path = None
     app = None
     
@@ -201,14 +190,12 @@ def run_resize_on_folder(target_folder_path, config):
         app.wait_cpu_usage_lower(threshold=5, timeout=60)
         time.sleep(initial_launch_wait)
         
-        cancel_clicked = find_and_click_image(CANCEL_RECOVER_BUTTON, confidence=0.9, retries=2, delay_seconds=10, description="'Cancel' button")
+        # This now uses the new default of 5 retries, 5 seconds.
+        cancel_clicked = find_and_click_image(CANCEL_RECOVER_BUTTON, confidence=0.9, description="'Cancel' button")
         if not cancel_clicked:
-            no_clicked = find_and_click_image(NO_BUTTON, confidence=0.9, retries=2, delay_seconds=10, description="'No' button")
-            if not no_clicked:
-                try:
-                    app.window(title_re=".*Adobe InDesign.*").wait('visible', timeout=10).set_focus().type_keys("{ENTER}")
-                except Exception:
-                    logging.info("No recovery dialog detected programmatically.")
+            # This also uses the new default.
+            find_and_click_image(NO_BUTTON, confidence=0.9, description="'No' button")
+
         logging.info("Recovery dialog handling complete.")
         time.sleep(inter_action_wait)
         main_window = app.window(title_re=".*Adobe InDesign.*").wait('visible', timeout=30)
@@ -216,16 +203,19 @@ def run_resize_on_folder(target_folder_path, config):
         main_window.type_keys("^%{F11}")
         time.sleep(inter_action_wait)
         
+        # This now uses the new default of 5 retries, 5 seconds.
         resize_found_directly = find_and_click_image(RESIZE_ALL_SCRIPT, confidence=0.9, description="'resizeall' script (direct search)")
         if resize_found_directly:
             location = pyautogui.locateCenterOnScreen(RESIZE_ALL_SCRIPT, confidence=0.9)
             if location: pyautogui.doubleClick(location)
         else:
+            # This now uses the new default.
             user_folder_found = find_and_click_image(USER_SCRIPTS_FOLDER, confidence=0.9, description="'User' folder")
             if user_folder_found:
                 location = pyautogui.locateCenterOnScreen(USER_SCRIPTS_FOLDER, confidence=0.9)
                 if location: pyautogui.doubleClick(location)
                 time.sleep(2)
+                # This now uses the new default.
                 final_resize_found = find_and_click_image(RESIZE_ALL_SCRIPT, confidence=0.9, description="'resizeall' script (after expanding User)")
                 if final_resize_found:
                     location = pyautogui.locateCenterOnScreen(RESIZE_ALL_SCRIPT, confidence=0.9)
@@ -247,6 +237,9 @@ def run_resize_on_folder(target_folder_path, config):
         start_time = time.time()
         signal_found = False
         while time.time() - start_time < process_timeout:
+            # NOTE: This call intentionally uses retries=1.
+            # The while loop itself is the retry mechanism, polling every 5 seconds.
+            # This prevents a single check from blocking for 25 seconds.
             if find_and_click_image(SIGNAL_OK_BUTTON, confidence=0.9, retries=1, description="completion signal OK button"):
                 signal_found = True
                 break
@@ -255,9 +248,6 @@ def run_resize_on_folder(target_folder_path, config):
         if not signal_found:
             raise RuntimeError("Timeout waiting for the visual completion signal alert.")
         
-        # --- Artifact Validation ---
-        # We now call the updated verification function, passing the document stem and config.
-        # It will construct the final path itself, ensuring it checks the correct destination.
         indd_stem = target_folder_path.name
         is_valid = file_system.verify_resize_output(indd_stem, config)
         
@@ -276,6 +266,3 @@ def run_resize_on_folder(target_folder_path, config):
         if dest_script_path and dest_script_path.exists():
             try: dest_script_path.unlink()
             except OSError as e: logging.warning(f"Could not delete script: {e}")
-            
-                    
-            
