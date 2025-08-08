@@ -59,12 +59,20 @@ def handle_opening_dialogs(app, config):
 
 def export_html_via_ui(indd_path, config):
     """
-    Exports a single InDesign file to HTML.
-    This version includes the "Clean Slate" logic to delete old output first.
+    Exports a single InDesign file directly to the final output destination
+    specified in config.ini.
     """
     project_root = Path().resolve()
     images_root = project_root / config.get('Paths', 'image_assets_folder')
-    output_folder = project_root / config.get('Paths', 'output_folder')
+    
+    # --- MODIFIED: Read the FINAL destination path directly from config ---
+    # This is the absolute path to C:/.../html-flyers-static/flyers
+    try:
+        final_destination_root = Path(config.get('Paths', 'final_flyers_output_folder'))
+    except Exception as e:
+        logging.error(f"FATAL: Could not read 'final_flyers_output_folder' from config.ini. Error: {e}")
+        return False
+        
     EXPORT_IMAGE = str(images_root / config.get('ImageFiles', 'export_button'))
     CANCEL_RECOVER_BUTTON = str(images_root / config.get('ImageFiles', 'cancel_recover_button'))
     initial_launch_wait = config.getint('Settings', 'initial_launch_wait')
@@ -73,10 +81,11 @@ def export_html_via_ui(indd_path, config):
     
     app = None
     try:
-        # REQUIREMENT 1: "Clean Slate" logic for the export output.
-        final_output_path = output_folder / indd_path.stem
+        # --- MODIFIED: "Clean Slate" logic now targets the FINAL destination ---
+        final_output_path = final_destination_root / indd_path.stem
+        logging.info(f"Ensuring clean export destination: {final_output_path}")
         if final_output_path.exists():
-            logging.warning(f"Output folder '{final_output_path.name}' already exists. Deleting it to ensure a clean export.")
+            logging.warning(f"Final output folder '{final_output_path.name}' already exists. Deleting it to ensure a clean export.")
             try:
                 shutil.rmtree(final_output_path)
             except OSError as e:
@@ -89,7 +98,6 @@ def export_html_via_ui(indd_path, config):
         
         time.sleep(initial_launch_wait)
         
-        # This now uses the new default of 5 retries, 5 seconds.
         find_and_click_image(CANCEL_RECOVER_BUTTON, confidence=0.9, description="Cancel Recovery button")
         
         time.sleep(inter_action_wait)
@@ -97,38 +105,44 @@ def export_html_via_ui(indd_path, config):
         
         main_window = app.window(title_re=f".*{indd_path.name}.*").wait('visible', timeout=30)
         main_window.set_focus()
-        main_window.type_keys("^e")
+        main_window.type_keys("^e") # Ctrl+E for Export
+        
         export_dialog = app.window(title="Export", class_name="#32770").wait('visible', timeout=15)
-        export_dialog.type_keys("{TAB}h{DOWN 2}{ENTER}")
-        pyperclip.copy(str(output_folder))
-        export_dialog.type_keys("{TAB 7}{ENTER}")
-        export_dialog.type_keys("^v{ENTER}")
+        export_dialog.type_keys("{TAB}h{DOWN 2}{ENTER}") # Select HTML format
+
+        # --- MODIFIED: Copy the FINAL destination path to the clipboard ---
+        logging.info(f"Pasting final destination path to clipboard: {final_destination_root}")
+        pyperclip.copy(str(final_destination_root))
+        
+        export_dialog.type_keys("{TAB 7}{ENTER}") # Navigate to path input field
+        export_dialog.type_keys("^v{ENTER}") # Paste and enter the path
         time.sleep(3)
-        export_dialog.type_keys("{TAB 10}{ENTER 2}")
+        export_dialog.type_keys("{TAB 10}{ENTER 2}") # Save the export
         try:
             app.window(title="Warning").wait('visible', timeout=5).type_keys("{ENTER}")
             time.sleep(inter_action_wait)
         except Exception: pass
+        
         html_options_dialog = None
         start_time = time.time()
         while time.time() - start_time < 30:
             for win in Desktop(backend="uia").windows():
                 title = win.window_text().strip()
+                # Find the "Export HTML5" options dialog which has a dynamic title
                 if title and "InDesign" not in title and "Warning" not in title:
                     html_options_dialog = win
                     break
             if html_options_dialog: break
             time.sleep(0.5)
-            
-        time.sleep(15)
         
         if html_options_dialog:
             html_options_dialog.set_focus()
-            # This now uses the new default of 5 retries, 5 seconds.
             if not find_and_click_image(EXPORT_IMAGE, confidence=0.8, description="Export button"):
                 html_options_dialog.type_keys("{TAB 6}{ENTER}")
         else: raise RuntimeError("Export HTML5 Package dialog not found.")
+        
         time.sleep(process_wait)
+        
         try:
             app.window(title="Export HTML5 package warning(s)").wait('visible', timeout=20).type_keys("{ENTER}")
         except Exception: pass
@@ -136,6 +150,7 @@ def export_html_via_ui(indd_path, config):
         time.sleep(process_wait)
         
         try:
+            # Attempt to close the file explorer window that may open
             Desktop(backend="win32").window(title_re=f"^{indd_path.stem}.*", class_name="CabinetWClass").wait('visible', timeout=15).close()
         except Exception: 
             pass
