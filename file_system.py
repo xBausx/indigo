@@ -2,6 +2,7 @@
 import logging
 import shutil
 import os
+import time
 from pathlib import Path
 
 def clear_indesign_cache():
@@ -167,3 +168,68 @@ def cleanup_intermediate_folder(indd_file_stem, request_id, config):
         # We log this as a warning because the primary job succeeded.
         # Cleanup failure should not cause the entire process to be marked as an error.
         logging.warning(f"[ReqID: {request_id}] An error occurred during intermediate folder cleanup: {e}", exc_info=True)
+
+def copy_then_delete_indesign(source_path, dest_folder_path, request_id, verify_copy=True):
+    """
+    Copies the source .indd to dest folder. Tries to delete the source.
+    If the source is locked, logs and leaves it for later cleanup.
+    Returns True if copy succeeded (delete may be deferred).
+    """
+    try:
+        source = Path(source_path)
+        dest_folder = Path(dest_folder_path)
+        dest_folder.mkdir(exist_ok=True)
+        dest = dest_folder / source.name
+
+        shutil.copy2(str(source), str(dest))
+        logging.info(f"[ReqID: {request_id}] Copied '{source.name}' -> '{dest_folder}'.")
+
+        if verify_copy:
+            try:
+                src_size = source.stat().st_size
+                dst_size = dest.stat().st_size
+                if src_size != dst_size:
+                    logging.warning(f"[ReqID: {request_id}] Copy size mismatch (src={src_size}, dst={dst_size}).")
+            except Exception as e:
+                logging.warning(f"[ReqID: {request_id}] Could not verify copy sizes: {e}")
+
+        # Try delete now (may fail due to lock)
+        try:
+            source.unlink()
+            logging.info(f"[ReqID: {request_id}] Deleted original: {source}")
+        except PermissionError:
+            logging.warning(f"[ReqID: {request_id}] Source still locked; will delete later: {source}")
+        except Exception as e:
+            logging.warning(f"[ReqID: {request_id}] Could not delete source now: {e}")
+
+        return True
+
+    except Exception as e:
+        logging.error(f"[ReqID: {request_id}] Failed to copy '{source_path}' to '{dest_folder_path}': {e}", exc_info=True)
+        return False
+
+
+def ensure_deleted_after_close(path, request_id, retries=10, delay_seconds=1.0):
+    """
+    After InDesign is closed, try repeatedly to delete the original file.
+    Returns True if deleted or not present, False if still present after retries.
+    """
+    p = Path(path)
+    if not p.exists():
+        return True
+
+    for i in range(retries):
+        try:
+            p.unlink()
+            logging.info(f"[ReqID: {request_id}] Deleted original after close: {p}")
+            return True
+        except PermissionError:
+            time.sleep(delay_seconds)
+        except Exception as e:
+            logging.warning(f"[ReqID: {request_id}] Delete retry {i+1}/{retries} failed: {e}")
+            time.sleep(delay_seconds)
+
+    if p.exists():
+        logging.warning(f"[ReqID: {request_id}] Original still present after retries: {p}")
+        return False
+    return True

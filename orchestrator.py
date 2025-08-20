@@ -78,6 +78,9 @@ def main():
                 file_system.clear_indesign_cache()
                 if indesign_ui.export_html_via_ui(indd_file_path, config):
                     export_successful = True
+                    
+                    logging.info(f"Exporting HTML5 Package for '{indd_file_path.name}' was successful.")
+                    
                     break
                 else:
                     raise RuntimeError("export_html_via_ui returned False.")
@@ -85,11 +88,35 @@ def main():
                 logging.error(f"[ReqID: {request_id}] FAILURE: HTML Export attempt {attempt + 1} failed.", exc_info=True)
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
-
-        # --- STAGE 2: RESIZE PROCESS AND CALLBACK ---
+        
+        # --- STAGE 2: JPEG EXPORT ---
+        jpeg_export_successful = False
         if export_successful:
+            for attempt in range(max_retries):
+                logging.info(f"[ReqID: {request_id}] JPEG Export - Attempt {attempt + 1} of {max_retries}...")
+                try:
+                    if indesign_ui.export_jpeg_via_ui(indd_file_path, config):
+                        jpeg_export_successful = True
+                        
+                        logging.info(f"Exporting JPEG Image for '{indd_file_path.name}' was successful.")
+                        break
+                    else:
+                        raise RuntimeError("export_jpeg_via_ui returned False.")
+                except Exception:
+                    logging.error(f"[ReqID: {request_id}] FAILURE: JPEG Export attempt {attempt + 1} failed.", exc_info=True)
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+        
+        if not jpeg_export_successful and export_successful:
+            logging.error(f"[ReqID: {request_id}] All JPEG export attempts failed for '{indd_file_path.name}'.")
+            file_system.move_file_to_folder(indd_file_path, error_folder)
+            sys.exit(1)
+
+        # --- STAGE 3: RESIZE PROCESS AND CALLBACK ---
+        if export_successful and jpeg_export_successful:
             processed_subfolder = file_system.setup_processed_subfolder(indd_file_path, processed_folder)
-            file_system.move_file_to_folder(indd_file_path, processed_subfolder)
+            file_system.copy_then_delete_indesign(indd_file_path, processed_subfolder, request_id)
+
             
             if indesign_ui.run_resize_on_folder(processed_subfolder, config):
                 logging.info(f"[ReqID: {request_id}] Successfully processed and resized {indd_file_path.name}.")
@@ -100,7 +127,7 @@ def main():
                 if api_client.send_completion_callback(final_output_folder_path, request_id, indd_file_path.name, config):
                     logging.info(f"[SUMMARY] [ReqID: {request_id}] Process complete for {indd_file_path.name}. Callback successful.")
                     
-                    # --- NEW: Cleanup the intermediate output folder now that we are completely finished ---
+                    # --- Cleanup the intermediate output folder now that we are completely finished ---
                     file_system.cleanup_intermediate_folder(indd_file_path.stem, request_id, config)
 
                 else:
@@ -111,9 +138,7 @@ def main():
                 file_system.move_file_to_folder(processed_subfolder, error_folder)
                 sys.exit(1)
         else:
-            logging.error(f"[ReqID: {request_id}] All HTML export attempts failed for '{indd_file_path.name}'.")
-            file_system.move_file_to_folder(indd_file_path, error_folder)
-            sys.exit(1)
+            logging.error(f"[ReqID: {request_id}] All export attempts failed for '{indd_file_path.name}'.")
 
     except Exception as e:
         logging.error(f"[ReqID: {request_id}] A critical, unhandled error occurred: {e}", exc_info=True)

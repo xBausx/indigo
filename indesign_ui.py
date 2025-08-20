@@ -4,6 +4,7 @@ import shutil
 import time
 import os
 import pyperclip
+import re
 from pathlib import Path
 
 import file_system 
@@ -65,8 +66,6 @@ def export_html_via_ui(indd_path, config):
     project_root = Path().resolve()
     images_root = project_root / config.get('Paths', 'image_assets_folder')
     
-    # --- MODIFIED: Read the FINAL destination path directly from config ---
-    # This is the absolute path to C:/.../html-flyers-static/flyers
     try:
         final_destination_root = Path(config.get('Paths', 'final_flyers_output_folder'))
     except Exception as e:
@@ -81,7 +80,7 @@ def export_html_via_ui(indd_path, config):
     
     app = None
     try:
-        # --- MODIFIED: "Clean Slate" logic now targets the FINAL destination ---
+        # --- "Clean Slate" logic now targets the FINAL destination ---
         final_output_path = final_destination_root / indd_path.stem
         logging.info(f"Ensuring clean export destination: {final_output_path}")
         if final_output_path.exists():
@@ -91,8 +90,7 @@ def export_html_via_ui(indd_path, config):
             except OSError as e:
                 logging.error(f"FATAL: Could not delete existing output folder '{final_output_path}'. Error: {e}")
                 return False
-        
-        # This is your proven, working UI automation logic.
+            
         command_line = f'"{config.get("Paths", "indesign_executable")}" "{indd_path}"'
         app = Application(backend="win32").start(command_line)
         
@@ -110,13 +108,13 @@ def export_html_via_ui(indd_path, config):
         export_dialog = app.window(title="Export", class_name="#32770").wait('visible', timeout=15)
         export_dialog.type_keys("{TAB}h{DOWN 2}{ENTER}") # Select HTML format
 
-        # --- MODIFIED: Copy the FINAL destination path to the clipboard ---
         logging.info(f"Pasting final destination path to clipboard: {final_destination_root}")
         pyperclip.copy(str(final_destination_root))
         
         export_dialog.type_keys("{TAB 7}{ENTER}") # Navigate to path input field
         export_dialog.type_keys("^v{ENTER}") # Paste and enter the path
         time.sleep(3)
+        logging.info(f"Saving the Export to: {final_destination_root}")
         export_dialog.type_keys("{TAB 10}{ENTER 2}") # Save the export
         try:
             app.window(title="Warning").wait('visible', timeout=5).type_keys("{ENTER}")
@@ -125,6 +123,9 @@ def export_html_via_ui(indd_path, config):
         
         html_options_dialog = None
         start_time = time.time()
+        
+        logging.info(f"Handling HTML5 export options dialog for '{indd_path.name}'...")
+        
         while time.time() - start_time < 30:
             for win in Desktop(backend="uia").windows():
                 title = win.window_text().strip()
@@ -141,6 +142,8 @@ def export_html_via_ui(indd_path, config):
                 html_options_dialog.type_keys("{TAB 6}{ENTER}")
         else: raise RuntimeError("Export HTML5 Package dialog not found.")
         
+        logging.info(f"Handled HTML5 export options dialog for '{indd_path.name}'.")
+        
         time.sleep(process_wait)
         
         try:
@@ -149,28 +152,157 @@ def export_html_via_ui(indd_path, config):
         
         time.sleep(process_wait)
         
+        logging.info(f"Closing the file explorer window for '{indd_path.stem}' if it opened...")
+        
         try:
             # Attempt to close the file explorer window that may open
             Desktop(backend="win32").window(title_re=f"^{indd_path.stem}.*", class_name="CabinetWClass").wait('visible', timeout=15).close()
         except Exception: 
             pass
         
-        app.kill()
-        
-        time.sleep(3)
-        
         return True
     
     except Exception as e:
-        logging.error(f"An error occurred during the InDesign UI workflow: {e}", exc_info=True)
+        logging.error(f"An error occurred during the Export as HTML workflow: {e}", exc_info=True)
         if app and app.is_process_running(): app.kill()
+        return False
+
+def export_jpeg_via_ui(indd_path, config):
+    """
+    Reuse the running InDesign session (from HTML export) to export JPEG.
+    Destination: <final_flyers_output_folder>/<doc_stem>/JPEG
+    Sets Image Quality = Low and Resolution = 300 ppi in the Export JPEG dialog.
+    """
+    import re
+    project_root = Path().resolve()
+    images_root = project_root / config.get('Paths', 'image_assets_folder')
+    
+    
+    NO_BUTTON = str(images_root / config.get('ImageFiles', 'no_button'))
+    
+    # Build final/<doc_stem> (save JPEG next to index.html — NO subfolder)
+    try:
+        doc_stem = Path(indd_path).stem if not isinstance(indd_path, Path) else indd_path.stem
+        doc_output_dir = Path(config.get('Paths', 'final_flyers_output_folder')) / doc_stem
+        jpeg_output_dir = doc_output_dir  # keep downstream variable name to minimize edits
+    except Exception as e:
+        logging.error(f"FATAL: Could not build destination path from config.ini: {e}")
+        return False
+    
+    inter_action_wait  = config.getint('Settings', 'inter_action_wait')
+    process_wait       = config.getint('Settings', 'process_wait')
+
+    # Ensure the doc folder exists; DO NOT delete anything (index.html lives here)
+    try:
+        jpeg_output_dir.mkdir(parents=True, exist_ok=True)
+        logging.info(f"JPEG will be saved next to index.html in: {jpeg_output_dir}")
+    except OSError as e:
+        logging.error(f"FATAL: Could not ensure output folder '{jpeg_output_dir}'. Error: {e}")
+        return False
+
+    # Attach to existing InDesign
+    try:
+        app = Application(backend="win32").connect(title_re=".*InDesign.*")
+    except Exception:
+        logging.error("Could not attach to a running InDesign instance. Is HTML export keeping it open?", exc_info=True)
+        return False
+
+    doc_title_regex = f".*{re.escape(Path(indd_path).name)}.*"
+    doc_win = None
+
+    try:
+        # Close Explorer window that HTML export may have opened
+        try:
+            Desktop(backend="win32").window(
+                title_re=f"^{re.escape(doc_stem)}.*", class_name="CabinetWClass"
+            ).wait('visible', timeout=5).close()
+            time.sleep(0.5)
+        except Exception:
+            pass
+
+        # Focus the document (fallback to app shell)
+        try:
+            doc_win = app.window(title_re=doc_title_regex).wait('visible', timeout=30)
+        except Exception:
+            doc_win = app.window(title_re=".*Adobe InDesign.*").wait('visible', timeout=30)
+
+        doc_win.set_focus()
+        time.sleep(0.2)
+
+        # Open Export dialog
+        doc_win.type_keys("^e")
+        export_dlg = app.window(title="Export", class_name="#32770").wait('visible', timeout=15)
+        export_dlg.set_focus()
+
+        # Select JPEG format (same pattern as your HTML selection style)
+        export_dlg.type_keys("{TAB}J")
+
+        # Navigate to target path and paste it
+        logging.info(f"Pasting JPEG destination path to clipboard: {jpeg_output_dir}")
+        pyperclip.copy(str(jpeg_output_dir))
+        export_dlg.type_keys("{TAB 7}{ENTER}")
+        export_dlg.type_keys("^v{ENTER}")
+        
+        time.sleep(inter_action_wait)
+
+        # Confirm Save
+        export_dlg.type_keys("{TAB 10}{ENTER}")
+
+        # Overwrite/warnings if any
+        try:
+            warn = app.window(title_re=".*(Warning|Replace|Confirm Save As).*")
+            if warn.exists(timeout=5):
+                warn.type_keys("{ENTER}")
+        except Exception:
+            pass
+        
+        time.sleep(inter_action_wait)
+        
+        # ---- Export JPEG / JPEG Options dialog: YOUR NAVIGATION ----
+        resolution_value = 300  # ppi
+        try:
+            jpeg_opts = app.window(title_re=".*(Export JPEG).*").wait('visible', timeout=10)
+            
+            jpeg_opts.set_focus()
+            
+            time.sleep(0.2)
+
+            # Copy resolution (clipboard must be string)
+            pyperclip.copy(str(resolution_value))
+
+            # Image Quality -> Low
+            jpeg_opts.type_keys("{TAB 4}{DOWN 1}")
+
+            # Resolution (ppi) -> paste 300
+            # (often two tabs from Quality; keep your rhythm)
+            jpeg_opts.type_keys("{TAB 2}^a^v")
+
+            # Confirm export
+            jpeg_opts.type_keys("{ENTER}")
+        except Exception:
+            logging.info("JPEG Options dialog not detected; proceeding with defaults.")
+
+        # Allow files to land
+        time.sleep(inter_action_wait)
+
+        return True
+
+    except Exception as e:
+        logging.error(f"An error occurred during the JPEG export UI workflow: {e}", exc_info=True)
+        # Best-effort: release lock on failure too
+        try:
+            if doc_win:
+                doc_win.set_focus()
+                doc_win.type_keys("^w")
+        except Exception:
+            pass
         return False
 
 def run_resize_on_folder(target_folder_path, config):
     """
-    Launches a clean InDesign instance and runs the resize script.
-    This version uses a resilient VISUAL check for the completion signal
-    and calls the updated artifact verification method.
+    Reuses the current InDesign session (document still open) and runs the resize script.
+    Waits for the visual completion signal, verifies output, then CLOSES InDesign so
+    downstream file moves are safe.
     """
     project_root = Path().resolve()
     scripts_folder = project_root / config.get('Paths', 'scripts_folder')
@@ -184,7 +316,6 @@ def run_resize_on_folder(target_folder_path, config):
     RESIZE_ALL_SCRIPT = str(images_root / config.get('ImageFiles', 'resize_all_script'))
     SIGNAL_OK_BUTTON = str(images_root / config.get('ImageFiles', 'signal_ok_button'))
     
-    initial_launch_wait = config.getint('Settings', 'initial_launch_wait')
     inter_action_wait = config.getint('Settings', 'inter_action_wait')
     process_timeout = config.getint('Settings', 'process_timeout')
     
@@ -201,44 +332,73 @@ def run_resize_on_folder(target_folder_path, config):
         dest_script_folder.mkdir(parents=True, exist_ok=True)
         dest_script_path = dest_script_folder / source_script_path.name
         shutil.copy2(source_script_path, dest_script_path)
-        app = Application(backend="win32").start(indesign_executable)
-        app.wait_cpu_usage_lower(threshold=5, timeout=60)
-        time.sleep(initial_launch_wait)
         
-        # This now uses the new default of 5 retries, 5 seconds.
-        cancel_clicked = find_and_click_image(CANCEL_RECOVER_BUTTON, confidence=0.9, description="'Cancel' button")
-        if not cancel_clicked:
-            # This also uses the new default.
-            find_and_click_image(NO_BUTTON, confidence=0.9, description="'No' button")
+        try:
+            app = Application(backend="win32").connect(path=indesign_executable)
+        except Exception:
+            # Fallback to first visible InDesign window handle if path-attach fails
+            wins = Desktop(backend="win32").windows(title_re=".*InDesign.*")
+            if not wins:
+                logging.error("Could not attach to a running InDesign instance for resize.")
+                return False
+            app = Application(backend="win32").connect(handle=wins[0].handle)
 
-        logging.info("Recovery dialog handling complete.")
-        time.sleep(inter_action_wait)
-        main_window = app.window(title_re=".*Adobe InDesign.*").wait('visible', timeout=30)
-        main_window.set_focus()
+
+        # Prefer the actual .indd name from the target folder; fall back to generic titles
+        try:
+            indd_file = next(Path(target_folder_path).glob("*.indd"))
+            doc_title_regex = f".*{re.escape(indd_file.name)}.*"
+        except StopIteration:
+            doc_title_regex = None
+
+        candidates = [doc_title_regex, r".*Adobe InDesign.*", r".*InDesign.*"]
+
+        main_window = None
+        for pat in [p for p in candidates if p]:
+            try:
+                win = app.window(title_re=pat)
+                if win.exists(timeout=5):
+                    try:
+                        win.restore()   # if minimized
+                    except Exception:
+                        pass
+                    win.set_focus()
+                    main_window = win
+                    break
+            except Exception:
+                continue
+
+        if main_window is None:
+            # Last resort: whatever InDesign's top window is right now
+            main_window = app.top_window()
+            try:
+                main_window.restore()
+            except Exception:
+                pass
+            main_window.set_focus()
+
+        # Open Scripts panel
         main_window.type_keys("^%{F11}")
         time.sleep(inter_action_wait)
         
-        # This now uses the new default of 5 retries, 5 seconds.
-        resize_found_directly = find_and_click_image(RESIZE_ALL_SCRIPT, confidence=0.9, description="'resizeall' script (direct search)")
-        if resize_found_directly:
-            location = pyautogui.locateCenterOnScreen(RESIZE_ALL_SCRIPT, confidence=0.9)
+        time.sleep(inter_action_wait)
+
+
+        # This now uses the new default.
+        user_folder_found = find_and_click_image(USER_SCRIPTS_FOLDER, confidence=0.9, description="'User' folder")
+        if user_folder_found:
+            location = pyautogui.locateCenterOnScreen(USER_SCRIPTS_FOLDER, confidence=0.9)
             if location: pyautogui.doubleClick(location)
-        else:
+            time.sleep(2)
             # This now uses the new default.
-            user_folder_found = find_and_click_image(USER_SCRIPTS_FOLDER, confidence=0.9, description="'User' folder")
-            if user_folder_found:
-                location = pyautogui.locateCenterOnScreen(USER_SCRIPTS_FOLDER, confidence=0.9)
+            final_resize_found = find_and_click_image(RESIZE_ALL_SCRIPT, confidence=0.9, description="'resizeall' script (after expanding User)")
+            if final_resize_found:
+                location = pyautogui.locateCenterOnScreen(RESIZE_ALL_SCRIPT, confidence=0.9)
                 if location: pyautogui.doubleClick(location)
-                time.sleep(2)
-                # This now uses the new default.
-                final_resize_found = find_and_click_image(RESIZE_ALL_SCRIPT, confidence=0.9, description="'resizeall' script (after expanding User)")
-                if final_resize_found:
-                    location = pyautogui.locateCenterOnScreen(RESIZE_ALL_SCRIPT, confidence=0.9)
-                    if location: pyautogui.doubleClick(location)
-                else:
-                    raise RuntimeError("Could not find 'resizeall' script after expanding 'User' folder.")
             else:
-                raise RuntimeError("Could not find 'User' folder in the Scripts Panel.")
+                raise RuntimeError("Could not find 'resizeall' script after expanding 'User' folder.")
+        else:
+            raise RuntimeError("Could not find 'User' folder in the Scripts Panel.")
 
         choose_folder_dialog = app.window(title="Choose Folder").wait('visible', timeout=20)
         choose_folder_dialog.set_focus()
@@ -281,3 +441,4 @@ def run_resize_on_folder(target_folder_path, config):
         if dest_script_path and dest_script_path.exists():
             try: dest_script_path.unlink()
             except OSError as e: logging.warning(f"Could not delete script: {e}")
+
