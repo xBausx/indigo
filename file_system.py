@@ -47,7 +47,7 @@ def setup_processed_subfolder(indd_path, processed_root_path_str):
     indd_file = Path(indd_path)
     processed_root_path = Path(processed_root_path_str)
     new_folder = processed_root_path / indd_file.stem
-    new_folder.mkdir(exist_ok=True)
+    new_folder.mkdir(parents=True, exist_ok=True)
     return new_folder
 
 def move_file_to_folder(source_path, dest_folder_path):

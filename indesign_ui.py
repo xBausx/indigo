@@ -449,3 +449,39 @@ def run_resize_on_folder(target_folder_path, config):
             try: dest_script_path.unlink()
             except OSError as e: logging.warning(f"Could not delete script: {e}")
 
+
+def close_document(config, indd_filename):
+    """
+    Connects to the running InDesign app, closes the active document to release
+    the file lock, but leaves the application running.
+    """
+    project_root = Path().resolve()
+    images_root = project_root / config.get('Paths', 'image_assets_folder')
+    NO_BUTTON = str(images_root / config.get('ImageFiles', 'no_button'))
+    inter_action_wait = config.getint('Settings', 'inter_action_wait')
+
+    logging.info(f"Closing document '{indd_filename}' to release file lock...")
+    try:
+        app = Application(backend="win32").connect(title_re=".*InDesign.*")
+        
+        # Use a specific regex for the window title to ensure we have the right one
+        doc_title_regex = f".*{re.escape(Path(indd_filename).name)}.*"
+        main_window = app.window(title_re=doc_title_regex).wait('visible', timeout=30)
+        
+        main_window.set_focus()
+        main_window.type_keys("^w") # Ctrl+W closes the document
+        time.sleep(inter_action_wait)
+        
+        # Handle the "Do you want to save?" dialog by clicking "No"
+        find_and_click_image(NO_BUTTON, confidence=0.9, description="'Save No' button")
+        logging.info("Document closed successfully.")
+        return True
+    except Exception as e:
+        logging.error(f"An error occurred while trying to close document '{indd_filename}': {e}", exc_info=True)
+        # As a fallback, kill the app to prevent a total hang
+        try:
+            if 'app' in locals() and app.is_process_running():
+                app.kill()
+        except Exception:
+            pass
+        return False

@@ -4,6 +4,7 @@ import configparser
 import time
 from pathlib import Path
 import sys
+from pywinauto.application import Application
 
 # Import our custom libraries
 import file_system
@@ -43,10 +44,8 @@ def main():
     This script is a single-file worker. It processes one InDesign file
     and uses a requestId for end-to-end traceability.
     """
-    # --- Now expects two arguments: file path and requestId ---
     if len(sys.argv) < 3:
-        print("FATAL ERROR: InDesign file path and requestId were not provided.")
-        sys.exit(1)
+        sys.exit("FATAL ERROR: InDesign file path and requestId were not provided.")
         
     indd_file_path = Path(sys.argv[1])
     request_id = sys.argv[2]
@@ -55,104 +54,73 @@ def main():
     config = configparser.ConfigParser()
     config.read(project_root / 'config.ini')
 
-    # --- Pass requestId to the logging setup ---
     setup_logging_for_file(config, indd_file_path.stem, request_id)
-    
-    # --- All subsequent log messages will be manually tagged with the Request ID ---
     
     processed_folder = project_root / config.get('Paths', 'processed_folder')
     error_folder = project_root / config.get('Paths', 'error_folder')
     final_output_base_path = Path(config.get('Paths', 'final_flyers_output_folder'))
-    max_retries = config.getint('Settings', 'max_retries')
-    retry_delay = config.getint('Settings', 'retry_delay_seconds')
-
+    
+    app_is_running = False
+    
     logging.info("==========================================================")
     logging.info(f"[ReqID: {request_id}] Indigo Worker started for file: {indd_file_path.name}")
     
     try:
         # --- STAGE 1: HTML EXPORT ---
-        export_successful = False
-        for attempt in range(max_retries):
-            logging.info(f"[ReqID: {request_id}] HTML Export - Attempt {attempt + 1} of {max_retries}...")
-            try:
-                file_system.clear_indesign_cache()
-                if indesign_ui.export_html_via_ui(indd_file_path, config):
-                    export_successful = True
-                    
-                    logging.info(f"Exporting HTML5 Package for '{indd_file_path.name}' was successful.")
-                    
-                    break
-                else:
-                    raise RuntimeError("export_html_via_ui returned False.")
-            except Exception:
-                logging.error(f"[ReqID: {request_id}] FAILURE: HTML Export attempt {attempt + 1} failed.", exc_info=True)
-                if attempt < max_retries - 1:
-                    time.sleep(retry_delay)
+        logging.info(f"[ReqID: {request_id}] Starting Stage 1: HTML Export...")
+        if not indesign_ui.export_html_via_ui(indd_file_path, config):
+            raise RuntimeError("Stage 1: export_html_via_ui returned False.")
+        app_is_running = True
         
         # --- STAGE 2: JPEG EXPORT ---
-        jpeg_export_successful = False
-        if export_successful:
-            for attempt in range(max_retries):
-                logging.info(f"[ReqID: {request_id}] JPEG Export - Attempt {attempt + 1} of {max_retries}...")
-                try:
-                    if indesign_ui.export_jpeg_via_ui(indd_file_path, config):
-                        jpeg_export_successful = True
-                        
-                        logging.info(f"Exporting JPEG Image for '{indd_file_path.name}' was successful.")
-                        break
-                    else:
-                        raise RuntimeError("export_jpeg_via_ui returned False.")
-                except Exception:
-                    logging.error(f"[ReqID: {request_id}] FAILURE: JPEG Export attempt {attempt + 1} failed.", exc_info=True)
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay)
-        
-        if not jpeg_export_successful and export_successful:
-            logging.error(f"[ReqID: {request_id}] All JPEG export attempts failed for '{indd_file_path.name}'.")
-            file_system.move_file_to_folder(indd_file_path, error_folder)
-            sys.exit(1)
+        logging.info(f"[ReqID: {request_id}] Starting Stage 2: JPEG Export...")
+        if not indesign_ui.export_jpeg_via_ui(indd_file_path, config):
+            raise RuntimeError("Stage 2: export_jpeg_via_ui returned False.")
 
-        # --- STAGE 3: RESIZE PROCESS AND CALLBACK ---
-        if export_successful and jpeg_export_successful:
-            processed_subfolder = file_system.setup_processed_subfolder(indd_file_path, processed_folder)
-            file_system.copy_then_delete_indesign(indd_file_path, processed_subfolder, request_id)
+        # --- STAGE 3: CLOSE DOCUMENT TO RELEASE LOCK ---
+        logging.info(f"[ReqID: {request_id}] Starting Stage 3: Closing Document...")
+        if not indesign_ui.close_document(config, indd_file_path.name):
+            raise RuntimeError("Stage 3: close_document returned False.")
 
+        # --- STAGE 4: MOVE FILE (Now Safe) ---
+        logging.info(f"[ReqID: {request_id}] Starting Stage 4: Moving File...")
+        processed_subfolder = file_system.setup_processed_subfolder(indd_file_path, processed_folder)
+        # Use the original, clean move function. The lock is gone.
+        file_system.move_file_to_folder(indd_file_path, processed_subfolder)
+
+        # --- STAGE 5: RESIZE PROCESS AND FINAL CLOSE ---
+        logging.info(f"[ReqID: {request_id}] Starting Stage 5: Resize Script...")
+        if indesign_ui.run_resize_on_folder(processed_subfolder, config):
+            app_is_running = False # run_resize_on_folder now kills the app
+            logging.info(f"[ReqID: {request_id}] Successfully processed and resized {indd_file_path.name}.")
             
-            if indesign_ui.run_resize_on_folder(processed_subfolder, config):
-                logging.info(f"[ReqID: {request_id}] Successfully processed and resized {indd_file_path.name}.")
-                
-                logging.info(f"[ReqID: {request_id}] Attempting to send completion callback...")
-                final_output_folder_path = final_output_base_path / indd_file_path.stem
-                
-                if api_client.send_completion_callback(final_output_folder_path, request_id, indd_file_path.name, config):
-                    logging.info(f"[SUMMARY] [ReqID: {request_id}] Process complete for {indd_file_path.name}. Callback successful.")
-                    
-                    # --- Cleanup the intermediate output folder now that we are completely finished ---
-                    file_system.cleanup_intermediate_folder(indd_file_path.stem, request_id, config)
-
-                else:
-                    logging.warning(f"[SUMMARY] [ReqID: {request_id}] Process complete for {indd_file_path.name}, but the final API callback FAILED.")
-
+            # --- FINAL CALLBACK ---
+            final_output_folder_path = final_output_base_path / indd_file_path.stem
+            if api_client.send_completion_callback(final_output_folder_path, request_id, indd_file_path.name, config):
+                logging.info(f"[SUMMARY] [ReqID: {request_id}] Process complete. Callback successful.")
             else:
-                logging.error(f"[ReqID: {request_id}] Resize process failed for '{indd_file_path.name}'. Moving its folder to Errors.")
-                file_system.move_file_to_folder(processed_subfolder, error_folder)
-                sys.exit(1)
+                logging.warning(f"[SUMMARY] [ReqID: {request_id}] Process complete, but the final API callback FAILED.")
         else:
-            logging.error(f"[ReqID: {request_id}] All export attempts failed for '{indd_file_path.name}'.")
+            app_is_running = False # run_resize_on_folder kills the app even on failure
+            raise RuntimeError(f"Stage 5: run_resize_on_folder returned False.")
 
     except Exception as e:
-        logging.error(f"[ReqID: {request_id}] A critical, unhandled error occurred: {e}", exc_info=True)
-        # Attempt to move the source file to error if it's still in the temp folder
+        logging.error(f"[ReqID: {request_id}] A critical error occurred: {e}", exc_info=True)
+        
+        # Graceful error handling
+        if app_is_running:
+            try: Application(backend="win32").connect(title_re=".*InDesign.*").kill()
+            except Exception: pass
+        
         if indd_file_path.exists():
             file_system.move_file_to_folder(indd_file_path, error_folder)
-        # If the file was already moved to processed, move that folder to error
         elif 'processed_subfolder' in locals() and processed_subfolder.exists():
             file_system.move_file_to_folder(processed_subfolder, error_folder)
         sys.exit(1)
 
     logging.info(f"Indigo Worker finished successfully for Request ID: {request_id}.")
     logging.info("==========================================================")
-
+    
 if __name__ == "__main__":
     try:
         # --- Added 'requests' to the dependency check ---
