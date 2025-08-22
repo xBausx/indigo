@@ -106,7 +106,14 @@ def export_html_via_ui(indd_path, config):
         main_window.type_keys("^e") # Ctrl+E for Export
         
         export_dialog = app.window(title="Export", class_name="#32770").wait('visible', timeout=15)
-        export_dialog.type_keys("{TAB}h{DOWN 2}{ENTER}") # Select HTML format
+        time.sleep(2)
+        export_dialog.type_keys("{TAB}{DOWN}") # Select HTML format       
+        time.sleep(1)
+        export_dialog.type_keys("html")
+        time.sleep(0.5)
+        export_dialog.type_keys("{DOWN}")
+        time.sleep(0.5)
+        export_dialog.type_keys("{ENTER}")           
 
         logging.info(f"Pasting final destination path to clipboard: {final_destination_root}")
         pyperclip.copy(str(final_destination_root))
