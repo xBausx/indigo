@@ -9,7 +9,7 @@ except ImportError:
     # This will be handled by the main orchestrator's check
     pass
 
-def send_completion_callback(output_folder_path, request_id, filename, config):
+def send_completion_callback(output_folder_path, request_id, filename, config, status="EXPORT_SUCCESS", pages=None):
     """
     Sends a POST request to the configured callback URL, including the
     requestId and original filename for end-to-end job tracking.
@@ -27,7 +27,8 @@ def send_completion_callback(output_folder_path, request_id, filename, config):
     payload = {
         "requestId": request_id,
         "fileName": filename,
-        "status": "success",
+        "status": status,
+        "pages": pages,
         "message": "InDesign processing and resize complete.",
         "outputFolderPath": Path(output_folder_path).resolve().as_posix()
     }

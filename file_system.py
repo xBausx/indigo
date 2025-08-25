@@ -169,16 +169,20 @@ def cleanup_intermediate_folder(indd_file_stem, request_id, config):
         # Cleanup failure should not cause the entire process to be marked as an error.
         logging.warning(f"[ReqID: {request_id}] An error occurred during intermediate folder cleanup: {e}", exc_info=True)
 
-def copy_then_delete_indesign(source_path, dest_folder_path, request_id, verify_copy=True):
+def copy_then_delete_indesign(source_path, dest_folder_path, request_id,
+                              verify_copy=True, max_tries=10, delay_seconds=1.0, backoff=1.5):
     """
-    Copies the source .indd to dest folder. Tries to delete the source.
-    If the source is locked, logs and leaves it for later cleanup.
+    Copies the source .indd to dest folder. Then tries to delete the source with retries.
+    If the source is locked, we keep retrying a few times; if still locked, we leave it in place.
     Returns True if copy succeeded (delete may be deferred).
     """
+    from pathlib import Path
+    import shutil, time, logging
+
     try:
         source = Path(source_path)
         dest_folder = Path(dest_folder_path)
-        dest_folder.mkdir(exist_ok=True)
+        dest_folder.mkdir(parents=True, exist_ok=True)  # parents=True is important on fresh trees
         dest = dest_folder / source.name
 
         shutil.copy2(str(source), str(dest))
@@ -193,14 +197,25 @@ def copy_then_delete_indesign(source_path, dest_folder_path, request_id, verify_
             except Exception as e:
                 logging.warning(f"[ReqID: {request_id}] Could not verify copy sizes: {e}")
 
-        # Try delete now (may fail due to lock)
-        try:
-            source.unlink()
-            logging.info(f"[ReqID: {request_id}] Deleted original: {source}")
-        except PermissionError:
-            logging.warning(f"[ReqID: {request_id}] Source still locked; will delete later: {source}")
-        except Exception as e:
-            logging.warning(f"[ReqID: {request_id}] Could not delete source now: {e}")
+        # Delete with retries (handles lingering file locks)
+        sleep_for = float(delay_seconds)
+        for attempt in range(1, max_tries + 1):
+            try:
+                source.unlink()
+                logging.info(f"[ReqID: {request_id}] Deleted original: {source}")
+                break
+            except PermissionError as e:
+                if attempt == max_tries:
+                    logging.error(f"[ReqID: {request_id}] Still locked after {max_tries} attempts; "
+                                f"leaving original in place: {source} ({e})")
+                else:
+                    logging.warning(f"[ReqID: {request_id}] Delete locked (attempt {attempt}/{max_tries}) for "
+                                    f"'{source.name}'; retrying in {sleep_for:.1f}s")
+                    time.sleep(sleep_for)
+                    sleep_for *= backoff
+            except Exception as e:
+                logging.warning(f"[ReqID: {request_id}] Could not delete source now: {e}")
+                break
 
         return True
 
@@ -233,3 +248,23 @@ def ensure_deleted_after_close(path, request_id, retries=10, delay_seconds=1.0):
         logging.warning(f"[ReqID: {request_id}] Original still present after retries: {p}")
         return False
     return True
+
+
+def read_page_count(indd_file_stem, config):
+    """
+    Returns the page count (int) from <final>/<stem>/__pagecount.txt, or None if missing/invalid.
+    """
+    try:
+        base = Path(config.get('Paths', 'final_flyers_output_folder'))
+        f = base / indd_file_stem / "__pagecount.txt"
+        if not f.is_file():
+            logging.warning(f"Page count file not found: {f}")
+            return None
+        txt = f.read_text(encoding="utf-8").strip()
+        if txt.isdigit():
+            return int(txt)
+        logging.warning(f"Unexpected content in page count file '{f}': '{txt}'")
+        return None
+    except Exception as e:
+        logging.error(f"Failed reading page count for '{indd_file_stem}': {e}", exc_info=True)
+        return None

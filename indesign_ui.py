@@ -17,7 +17,7 @@ except ImportError:
     pass
 
 # --- HELPER FUNCTIONS  ---
-def find_and_click_image(image_path, confidence=0.9, retries=5, delay_seconds=5, description="image"):
+def find_and_click_image(image_path, confidence=0.9, retries=5, delay_seconds=5, description="image", type="single"):
     """
     Looks for an image on screen and clicks it.
     """
@@ -26,7 +26,11 @@ def find_and_click_image(image_path, confidence=0.9, retries=5, delay_seconds=5,
         try:
             location = pyautogui.locateCenterOnScreen(image_path, confidence=confidence)
             if location:
-                pyautogui.click(location)
+                if type == "single":
+                    pyautogui.click(location)
+                else:
+                    pyautogui.doubleClick(location)
+                    
                 logging.info(f"Successfully found and clicked {description}.")
                 return True
         except Exception as e:
@@ -323,6 +327,7 @@ def run_resize_on_folder(target_folder_path, config):
     RESIZE_ALL_SCRIPT = str(images_root / config.get('ImageFiles', 'resize_all_script'))
     SIGNAL_OK_BUTTON = str(images_root / config.get('ImageFiles', 'signal_ok_button'))
     
+    initial_launch_wait = config.getint('Settings', 'initial_launch_wait')
     inter_action_wait = config.getint('Settings', 'inter_action_wait')
     process_timeout = config.getint('Settings', 'process_timeout')
     
@@ -343,13 +348,16 @@ def run_resize_on_folder(target_folder_path, config):
         try:
             app = Application(backend="win32").connect(path=indesign_executable)
         except Exception:
-            # Fallback to first visible InDesign window handle if path-attach fails
+            # try visible window first
             wins = Desktop(backend="win32").windows(title_re=".*InDesign.*")
-            if not wins:
-                logging.error("Could not attach to a running InDesign instance for resize.")
-                return False
-            app = Application(backend="win32").connect(handle=wins[0].handle)
-
+            if wins:
+                app = Application(backend="win32").connect(handle=wins[0].handle)
+            else:
+                # start a fresh instance (fallback)
+                app = Application(backend="win32").start(indesign_executable)
+                time.sleep(initial_launch_wait)
+                # optional: close recovery if it shows up
+                find_and_click_image(CANCEL_RECOVER_BUTTON, confidence=0.9, description="'Cancel' button")
 
         # Prefer the actual .indd name from the target folder; fall back to generic titles
         try:
@@ -386,27 +394,33 @@ def run_resize_on_folder(target_folder_path, config):
 
         # Open Scripts panel
         main_window.type_keys("^%{F11}")
-        time.sleep(inter_action_wait)
         
         time.sleep(inter_action_wait)
 
+        # --- Scripts panel: run 'resizeall' via double-clicks only ---
 
-        # This now uses the new default.
-        user_folder_found = find_and_click_image(USER_SCRIPTS_FOLDER, confidence=0.9, description="'User' folder")
-        if user_folder_found:
-            location = pyautogui.locateCenterOnScreen(USER_SCRIPTS_FOLDER, confidence=0.9)
-            if location: pyautogui.doubleClick(location)
-            time.sleep(2)
-            # This now uses the new default.
-            final_resize_found = find_and_click_image(RESIZE_ALL_SCRIPT, confidence=0.9, description="'resizeall' script (after expanding User)")
-            if final_resize_found:
-                location = pyautogui.locateCenterOnScreen(RESIZE_ALL_SCRIPT, confidence=0.9)
-                if location: pyautogui.doubleClick(location)
-            else:
-                raise RuntimeError("Could not find 'resizeall' script after expanding 'User' folder.")
-        else:
-            raise RuntimeError("Could not find 'User' folder in the Scripts Panel.")
-
+        resize_all_script = None
+        
+        try:
+            
+            attempt = find_and_click_image(RESIZE_ALL_SCRIPT, confidence=0.9, retries=2, type="double")
+            
+            if not attempt:
+                logging.info("'resizeall' script not found via image; attempting Users folder navigation...")
+                
+                # Find users folder
+                find_and_click_image(USER_SCRIPTS_FOLDER, confidence=0.9, type="double")
+                
+                time.sleep(1.5)
+                
+                # Click on resizeall script
+                find_and_click_image(RESIZE_ALL_SCRIPT, confidence=0.9, type="double")
+        
+        except Exception as e:
+            logging.error(f"'resizeall' script was not present in the initial Export Dialog menu: {e}")
+            
+        time.sleep(5)
+        
         choose_folder_dialog = app.window(title="Choose Folder").wait('visible', timeout=20)
         choose_folder_dialog.set_focus()
         input_folder_for_resize = str(target_folder_path.resolve())
@@ -484,4 +498,33 @@ def close_document(config, indd_filename):
                 app.kill()
         except Exception:
             pass
+        return False
+    
+def open_indd_only(indd_path, config):
+    """
+    Launches/attaches InDesign and opens the given .indd file WITHOUT exporting/cleaning.
+    Leaves the app + document open and focused for subsequent UI steps.
+    """
+    project_root = Path().resolve()
+    images_root = project_root / config.get('Paths', 'image_assets_folder')
+    CANCEL_RECOVER_BUTTON = str(images_root / config.get('ImageFiles', 'cancel_recover_button'))
+
+    initial_launch_wait = config.getint('Settings', 'initial_launch_wait')
+    inter_action_wait  = config.getint('Settings', 'inter_action_wait')
+
+    try:
+        command_line = f'"{config.get("Paths", "indesign_executable")}" "{indd_path}"'
+        app = Application(backend="win32").start(command_line)
+        time.sleep(initial_launch_wait)
+
+        # Handle recovery/missing dialogs (your proven routines)
+        find_and_click_image(CANCEL_RECOVER_BUTTON, confidence=0.9, description="Cancel Recovery button")
+        time.sleep(inter_action_wait)
+        handle_opening_dialogs(app, config)
+
+        # Park focus on the document window
+        app.window(title_re=f".*{Path(indd_path).name}.*").wait('visible', timeout=30).set_focus()
+        return True
+    except Exception as e:
+        logging.error(f"open_indd_only failed for '{indd_path}': {e}", exc_info=True)
         return False

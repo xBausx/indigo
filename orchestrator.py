@@ -9,7 +9,28 @@ from pywinauto.application import Application
 # Import our custom libraries
 import file_system
 import indesign_ui
-import api_client # <--  Import our API client
+import api_client
+
+def _attempt_with_retries(label, fn, args, retries, delay, request_id):
+    for attempt in range(1, retries + 1):
+        logging.info(f"[ReqID: {request_id}] {label} - Attempt {attempt} of {retries}...")
+        try:
+            if fn(*args):
+                logging.info(f"[ReqID: {request_id}] {label} - SUCCESS on attempt {attempt}.")
+                return True
+        except Exception:
+            logging.error(f"[ReqID: {request_id}] {label} raised an exception.", exc_info=True)
+        if attempt < retries:
+            time.sleep(delay)
+    logging.error(f"[ReqID: {request_id}] {label} - FAILED after {retries} attempts.")
+    return False
+
+def _kill_indesign_safely():
+    try:
+        Application(backend="win32").connect(title_re=".*InDesign.*").kill()
+        return True
+    except Exception:
+        return False
 
 def setup_logging_for_file(config, log_file_name, request_id):
     """
@@ -59,6 +80,9 @@ def main():
     processed_folder = project_root / config.get('Paths', 'processed_folder')
     error_folder = project_root / config.get('Paths', 'error_folder')
     final_output_base_path = Path(config.get('Paths', 'final_flyers_output_folder'))
+    max_retries   = config.getint('Settings', 'max_retries')
+    retry_delay   = config.getint('Settings', 'retry_delay_seconds')
+    restart_retries = config.getint('Settings', 'restart_retries', fallback=max_retries)
     
     app_is_running = False
     
@@ -68,44 +92,89 @@ def main():
     try:
         # --- STAGE 1: HTML EXPORT ---
         logging.info(f"[ReqID: {request_id}] Starting Stage 1: HTML Export...")
-        if not indesign_ui.export_html_via_ui(indd_file_path, config):
-            raise RuntimeError("Stage 1: export_html_via_ui returned False.")
+        if not _attempt_with_retries("Stage 1: HTML Export", indesign_ui.export_html_via_ui,
+                                    (indd_file_path, config), max_retries, retry_delay, request_id):
+            raise RuntimeError(f"Error during Stage 1 phase; retried {max_retries} times. Returning as failed.")
         app_is_running = True
         
         # --- STAGE 2: JPEG EXPORT ---
         logging.info(f"[ReqID: {request_id}] Starting Stage 2: JPEG Export...")
-        if not indesign_ui.export_jpeg_via_ui(indd_file_path, config):
-            raise RuntimeError("Stage 2: export_jpeg_via_ui returned False.")
+
+        # Retry in-place
+        jpeg_ok = _attempt_with_retries("Stage 2: JPEG Export", indesign_ui.export_jpeg_via_ui,
+                                        (indd_file_path, config), max_retries, retry_delay, request_id)
+
+        if not jpeg_ok:
+            logging.warning(f"[ReqID: {request_id}] Stage 2 failed after {max_retries} attempts; restarting InDesign and retrying Stage 2...")
+            _kill_indesign_safely()
+            app_is_running = False
+
+            # Reopen the same document WITHOUT redoing HTML export
+            if not indesign_ui.open_indd_only(indd_file_path, config):
+                raise RuntimeError(f"Stage 2 restart: could not reopen document.")
+
+            app_is_running = True
+
+            # Retry Stage 2 again after restart
+            jpeg_ok = _attempt_with_retries("Stage 2 (after restart): JPEG Export", indesign_ui.export_jpeg_via_ui,
+                                            (indd_file_path, config), restart_retries, retry_delay, request_id)
+
+            if not jpeg_ok:
+                total = max_retries + restart_retries
+                raise RuntimeError(f"Error during Stage 2 phase; retried {total} times (including after restart). Returning as failed.")
 
         # --- STAGE 3: CLOSE DOCUMENT TO RELEASE LOCK ---
         logging.info(f"[ReqID: {request_id}] Starting Stage 3: Closing Document...")
-        if not indesign_ui.close_document(config, indd_file_path.name):
-            raise RuntimeError("Stage 3: close_document returned False.")
+        if not _attempt_with_retries("Stage 3: Close Document", indesign_ui.close_document,
+                                    (config, indd_file_path.name), max_retries, retry_delay, request_id):
+            logging.warning(f"[ReqID: {request_id}] Close Document failed; killing InDesign as fallback.")
+            _kill_indesign_safely()
+            app_is_running = False
 
         # --- STAGE 4: MOVE FILE (Now Safe) ---
         logging.info(f"[ReqID: {request_id}] Starting Stage 4: Moving File...")
         processed_subfolder = file_system.setup_processed_subfolder(indd_file_path, processed_folder)
         # Use the original, clean move function. The lock is gone.
-        file_system.move_file_to_folder(indd_file_path, processed_subfolder)
+        file_system.copy_then_delete_indesign(indd_file_path, processed_subfolder, request_id)
 
         # --- STAGE 5: RESIZE PROCESS AND FINAL CLOSE ---
         logging.info(f"[ReqID: {request_id}] Starting Stage 5: Resize Script...")
-        if indesign_ui.run_resize_on_folder(processed_subfolder, config):
-            app_is_running = False # run_resize_on_folder now kills the app
+        resize_ok = _attempt_with_retries("Stage 5: Resize Script", indesign_ui.run_resize_on_folder,
+                                (processed_subfolder, config), max_retries, retry_delay, request_id)
+        # run_resize_on_folder launches/kills its own app instance; after it returns, app shouldn't be running
+        app_is_running = False
+
+        if resize_ok:
             logging.info(f"[ReqID: {request_id}] Successfully processed and resized {indd_file_path.name}.")
+            
+            # Read page count written by resizeall.js
+            page_count = file_system.read_page_count(indd_file_path.stem, config)
+            logging.info(f"[ReqID: {request_id}] Page count: {page_count if page_count is not None else 'unknown'}")
             
             # --- FINAL CALLBACK ---
             final_output_folder_path = final_output_base_path / indd_file_path.stem
-            if api_client.send_completion_callback(final_output_folder_path, request_id, indd_file_path.name, config):
+            if api_client.send_completion_callback(final_output_folder_path, request_id, indd_file_path.name, config, status="EXPORT_SUCCESS", pages=page_count):
                 logging.info(f"[SUMMARY] [ReqID: {request_id}] Process complete. Callback successful.")
             else:
                 logging.warning(f"[SUMMARY] [ReqID: {request_id}] Process complete, but the final API callback FAILED.")
         else:
-            app_is_running = False # run_resize_on_folder kills the app even on failure
-            raise RuntimeError(f"Stage 5: run_resize_on_folder returned False.")
+            raise RuntimeError(f"Stage 5: run_resize_on_folder failed after {max_retries} attempts.")
 
     except Exception as e:
         logging.error(f"[ReqID: {request_id}] A critical error occurred: {e}", exc_info=True)
+        
+        # notify failure with status
+        try:
+            api_client.send_completion_callback(
+                final_output_base_path / indd_file_path.stem,
+                request_id,
+                indd_file_path.name,
+                config,
+                status="EXPORT_FAILED",
+                pages=None
+            )
+        except Exception:
+            pass
         
         # Graceful error handling
         if app_is_running:
