@@ -31,11 +31,24 @@ function runSequentialBatchExport() {
             var mainExportFolder = new Folder(outputRootFolder.fsName + "/" + docName);
             if (!mainExportFolder.exists) mainExportFolder.create();
 
+            // --- NEW: write __pagecount.txt next to index.html in <docName> folder ---
+            try {
+                var pageCount = 0;
+                try { pageCount = doc.pages.length; } catch (e) {}
+                var pcFile = new File(mainExportFolder.fsName + "/__pagecount.txt");
+                pcFile.encoding = "UTF-8";
+                if (pcFile.open("w")) {
+                    pcFile.write(String(pageCount));
+                    pcFile.close();
+                }
+            } catch (e) {
+                // non-fatal; continue
+            }
+
             var imageSubfolder = new Folder(mainExportFolder.fsName + "/publication-web-resources/image");
             if (!imageSubfolder.exists) imageSubfolder.create();
 
             exportHighResAssets(doc, imageSubfolder, docName);
-
         } catch (e) {
             // Instead of failing silently, we now display a loud, blocking alert
             // with the actual error message from InDesign. This will stop the
