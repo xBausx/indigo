@@ -79,6 +79,9 @@ def main():
     indd_file_path = Path(sys.argv[1])
     request_id = sys.argv[2]
     
+    # Sanitize filename before any stage runs
+    indd_file_path = file_system.sanitize_indd_filename(indd_file_path)
+    
     project_root = Path().resolve()
     config = configparser.ConfigParser()
     config.read(project_root / 'config.ini')
