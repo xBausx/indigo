@@ -35,7 +35,6 @@ function runSequentialBatchExport() {
             if (!imageSubfolder.exists) imageSubfolder.create();
 
             exportHighResAssets(doc, imageSubfolder, docName);
-            exportDocumentAsHighResHTML(doc, mainExportFolder);
 
         } catch (e) {
             // Instead of failing silently, we now display a loud, blocking alert
@@ -107,25 +106,6 @@ function exportHighResAssets(doc, destinationFolder, docName) {
         } catch (e) {
             $.writeln("Failed to export: " + finalFileName + " — " + e.message);
         }
-    }
-}
-
-// --- HTML EXPORT HELPER (Your proven, working code - UNCHANGED) ---
-function exportDocumentAsHighResHTML(doc, destinationFolder) {
-    app.htmlExportPreferences.reset();
-    app.htmlExportPreferences.viewDocumentAfterExport = false;
-    app.htmlExportPreferences.exportSelection = false;
-    app.htmlExportPreferences.imageExportResolution = 72 * SCALE_FACTOR;
-    app.htmlExportPreferences.imageConversion = ImageConversion.AUTOMATIC;
-    app.htmlExportPreferences.imageQuality = ImageQuality.MAXIMUM;
-
-    var docName = doc.name.replace(/\.indd$/i, "");
-    var htmlFilePath = new File(destinationFolder.fsName + "/" + docName + ".html");
-
-    try {
-        doc.exportFile(ExportFormat.HTML, htmlFilePath, false);
-    } catch (e) {
-        throw new Error("Failed during HTML export: " + e.message);
     }
 }
 
