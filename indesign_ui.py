@@ -93,7 +93,8 @@ def export_html_via_ui(indd_path, config):
     except Exception as e:
         logging.error(f"FATAL: Could not read 'final_flyers_output_folder' from config.ini. Error: {e}")
         return False
-        
+    
+    YES_BUTTON = str(images_root / config.get('ImageFiles', 'yes_button'))
     EXPORT_IMAGE = str(images_root / config.get('ImageFiles', 'export_button'))
     CANCEL_RECOVER_BUTTON = str(images_root / config.get('ImageFiles', 'cancel_recover_button'))
     initial_launch_wait = config.getint('Settings', 'initial_launch_wait')
@@ -177,7 +178,9 @@ def export_html_via_ui(indd_path, config):
         time.sleep(process_wait)
         
         try:
-            app.window(title="Export HTML5 package warning(s)").wait('visible', timeout=20).type_keys("{ENTER}")
+            if not find_and_click_image(YES_BUTTON, confidence=0.8, description="Yes button"):
+                app.window(title="Export HTML5 package warning(s)").wait('visible', timeout=20).type_keys("{ENTER}")
+            
         except Exception: pass
         
         time.sleep(process_wait)
