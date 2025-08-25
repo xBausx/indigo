@@ -463,8 +463,8 @@ def run_resize_on_folder(target_folder_path, config):
         if not signal_found:
             raise RuntimeError("Timeout waiting for the visual completion signal alert.")
         
-        indd_stem = target_folder_path.name
-        is_valid = file_system.verify_resize_output(indd_stem, config)
+        safe_stem = _safe_stem(Path(target_folder_path).name)
+        is_valid = file_system.verify_resize_output(safe_stem, config)
         
         if is_valid:
             logging.info(f"--- Resize Process and Verification Successful for folder: {target_folder_path.name} ---")
@@ -481,7 +481,6 @@ def run_resize_on_folder(target_folder_path, config):
         if dest_script_path and dest_script_path.exists():
             try: dest_script_path.unlink()
             except OSError as e: logging.warning(f"Could not delete script: {e}")
-
 
 def close_document(config, indd_filename):
     """
