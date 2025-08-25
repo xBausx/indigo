@@ -10,6 +10,7 @@ from pywinauto.application import Application
 import file_system
 import indesign_ui
 import api_client
+from indesign_ui import _safe_stem
 
 def _attempt_with_retries(label, fn, args, retries, delay, request_id):
     for attempt in range(1, retries + 1):
@@ -70,6 +71,7 @@ def main():
         
     indd_file_path = Path(sys.argv[1])
     request_id = sys.argv[2]
+    safe_stem = _safe_stem(indd_file_path)
     
     project_root = Path().resolve()
     config = configparser.ConfigParser()
@@ -152,7 +154,7 @@ def main():
             logging.info(f"[ReqID: {request_id}] Page count: {page_count if page_count is not None else 'unknown'}")
             
             # --- FINAL CALLBACK ---
-            final_output_folder_path = final_output_base_path / indd_file_path.stem
+            final_output_folder_path = final_output_base_path / safe_stem
             if api_client.send_completion_callback(final_output_folder_path, request_id, indd_file_path.name, config, status="EXPORT_SUCCESS", pages=page_count):
                 logging.info(f"[SUMMARY] [ReqID: {request_id}] Process complete. Callback successful.")
             else:
