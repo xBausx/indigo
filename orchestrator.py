@@ -10,7 +10,7 @@ from pywinauto.application import Application
 import file_system
 import indesign_ui
 import api_client
-from indesign_ui import _safe_stem
+import re
 
 def _attempt_with_retries(label, fn, args, retries, delay, request_id):
     for attempt in range(1, retries + 1):
@@ -59,6 +59,11 @@ def setup_logging_for_file(config, log_file_name, request_id):
         ]
     )
     logging.info(f"Logging for Request ID {request_id} will be in: {file_log_path}")
+
+def _safe_stem(stem: str) -> str:
+    """Trim trailing spaces/dots and replace Windows-illegal chars for folder names."""
+    s = stem.strip().rstrip('.')              # trim whitespace ends + trailing dots
+    return re.sub(r'[<>:"/\\|?*]', '_', s)    # make it filesystem safe
 
 
 def main():
@@ -136,8 +141,15 @@ def main():
         # --- STAGE 4: MOVE FILE (Now Safe) ---
         logging.info(f"[ReqID: {request_id}] Starting Stage 4: Moving File...")
         processed_subfolder = file_system.setup_processed_subfolder(indd_file_path, processed_folder)
+
+        # Normalize the returned folder name in case setup_* didn’t sanitize it
+        safe_processed = processed_subfolder.parent / _safe_stem(processed_subfolder.name)
+        if safe_processed != processed_subfolder:
+            safe_processed.mkdir(parents=True, exist_ok=True)
+            processed_subfolder = safe_processed
+
         # Use the original, clean move function. The lock is gone.
-        file_system.copy_then_delete_indesign(indd_file_path, processed_subfolder, request_id)
+        file_system.move_file_to_folder(indd_file_path, processed_subfolder)
 
         # --- STAGE 5: RESIZE PROCESS AND FINAL CLOSE ---
         logging.info(f"[ReqID: {request_id}] Starting Stage 5: Resize Script...")
@@ -150,7 +162,8 @@ def main():
             logging.info(f"[ReqID: {request_id}] Successfully processed and resized {indd_file_path.name}.")
             
             # Read page count written by resizeall.js
-            page_count = file_system.read_page_count(indd_file_path.stem, config)
+            safe_stem = _safe_stem(indd_file_path.stem)
+            page_count = file_system.read_page_count(safe_stem, config)
             logging.info(f"[ReqID: {request_id}] Page count: {page_count if page_count is not None else 'unknown'}")
             
             # --- FINAL CALLBACK ---
@@ -167,8 +180,9 @@ def main():
         
         # notify failure with status
         try:
+            safe_stem = _safe_stem(indd_file_path.stem)
             api_client.send_completion_callback(
-                final_output_base_path / indd_file_path.stem,
+                final_output_base_path / safe_stem,
                 request_id,
                 indd_file_path.name,
                 config,
