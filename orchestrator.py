@@ -60,10 +60,12 @@ def setup_logging_for_file(config, log_file_name, request_id):
     )
     logging.info(f"Logging for Request ID {request_id} will be in: {file_log_path}")
 
-def _safe_stem(stem: str) -> str:
-    """Trim trailing spaces/dots and replace Windows-illegal chars for folder names."""
-    s = stem.strip().rstrip('.')              # trim whitespace ends + trailing dots
-    return re.sub(r'[<>:"/\\|?*]', '_', s)    # make it filesystem safe
+def _safe_stem(indd_path):
+    """Normalize the folder name derived from the INDD file name."""
+    s = Path(indd_path).stem
+    s = s.strip().rstrip(".")                             # trim spaces / trailing dots
+    s = re.sub(r'[<>:"/\\|?*]', "_", s)                  # replace illegal Win chars
+    return s or "untitled"
 
 
 def main():
@@ -76,7 +78,6 @@ def main():
         
     indd_file_path = Path(sys.argv[1])
     request_id = sys.argv[2]
-    safe_stem = _safe_stem(indd_file_path)
     
     project_root = Path().resolve()
     config = configparser.ConfigParser()
@@ -162,7 +163,7 @@ def main():
             logging.info(f"[ReqID: {request_id}] Successfully processed and resized {indd_file_path.name}.")
             
             # Read page count written by resizeall.js
-            safe_stem = _safe_stem(indd_file_path.stem)
+            safe_stem = _safe_stem(indd_file_path)
             page_count = file_system.read_page_count(safe_stem, config)
             logging.info(f"[ReqID: {request_id}] Page count: {page_count if page_count is not None else 'unknown'}")
             
@@ -180,7 +181,7 @@ def main():
         
         # notify failure with status
         try:
-            safe_stem = _safe_stem(indd_file_path.stem)
+            safe_stem = _safe_stem(indd_file_path)
             api_client.send_completion_callback(
                 final_output_base_path / safe_stem,
                 request_id,
