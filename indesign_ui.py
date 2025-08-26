@@ -5,6 +5,7 @@ import time
 import os
 import pyperclip
 import re
+import stat
 from pathlib import Path
 
 import file_system 
@@ -44,6 +45,23 @@ def find_and_click_image(image_path, confidence=0.9, retries=5, delay_seconds=5,
     logging.warning(f"Could not find {description} after {retries} attempts.")
     return False
 
+def _safe_stem(indd_path):
+    """Normalize the folder name derived from the INDD file name."""
+    s = Path(indd_path).stem
+    s = s.strip().rstrip(".")                             # trim spaces / trailing dots
+    s = re.sub(r'[<>:"/\\|?*]', "_", s)                  # replace illegal Win chars
+    return s or "untitled"
+
+def _rmtree_win(path: Path):
+    """Robust rmtree on Windows (clear read-only, etc.)."""
+    def _onerror(func, p, exc_info):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception:
+            pass
+    shutil.rmtree(str(path), onerror=_onerror)
+
 # --- CORE UI FUNCTIONS ---
 def handle_opening_dialogs(app, config):
     # This is your proven, working function. It is unchanged.
@@ -75,7 +93,8 @@ def export_html_via_ui(indd_path, config):
     except Exception as e:
         logging.error(f"FATAL: Could not read 'final_flyers_output_folder' from config.ini. Error: {e}")
         return False
-        
+    
+    YES_BUTTON = str(images_root / config.get('ImageFiles', 'yes_button'))
     EXPORT_IMAGE = str(images_root / config.get('ImageFiles', 'export_button'))
     CANCEL_RECOVER_BUTTON = str(images_root / config.get('ImageFiles', 'cancel_recover_button'))
     initial_launch_wait = config.getint('Settings', 'initial_launch_wait')
@@ -85,12 +104,13 @@ def export_html_via_ui(indd_path, config):
     app = None
     try:
         # --- "Clean Slate" logic now targets the FINAL destination ---
-        final_output_path = final_destination_root / indd_path.stem
+        safe_stem = _safe_stem(indd_path)
+        final_output_path = final_destination_root / safe_stem
         logging.info(f"Ensuring clean export destination: {final_output_path}")
         if final_output_path.exists():
             logging.warning(f"Final output folder '{final_output_path.name}' already exists. Deleting it to ensure a clean export.")
             try:
-                shutil.rmtree(final_output_path)
+                _rmtree_win(final_output_path)
             except OSError as e:
                 logging.error(f"FATAL: Could not delete existing output folder '{final_output_path}'. Error: {e}")
                 return False
@@ -158,7 +178,9 @@ def export_html_via_ui(indd_path, config):
         time.sleep(process_wait)
         
         try:
-            app.window(title="Export HTML5 package warning(s)").wait('visible', timeout=20).type_keys("{ENTER}")
+            if not find_and_click_image(YES_BUTTON, confidence=0.8, description="Yes button"):
+                app.window(title="Export HTML5 package warning(s)").wait('visible', timeout=20).type_keys("{ENTER}")
+            
         except Exception: pass
         
         time.sleep(process_wait)
@@ -193,13 +215,13 @@ def export_jpeg_via_ui(indd_path, config):
     
     # Build final/<doc_stem> (save JPEG next to index.html — NO subfolder)
     try:
-        doc_stem = Path(indd_path).stem if not isinstance(indd_path, Path) else indd_path.stem
+        doc_stem = _safe_stem(indd_path)
         doc_output_dir = Path(config.get('Paths', 'final_flyers_output_folder')) / doc_stem
-        jpeg_output_dir = doc_output_dir  # keep downstream variable name to minimize edits
+        jpeg_output_dir = doc_output_dir  # keep variable name used below
     except Exception as e:
         logging.error(f"FATAL: Could not build destination path from config.ini: {e}")
         return False
-    
+        
     inter_action_wait  = config.getint('Settings', 'inter_action_wait')
     process_wait       = config.getint('Settings', 'process_wait')
 
@@ -444,8 +466,8 @@ def run_resize_on_folder(target_folder_path, config):
         if not signal_found:
             raise RuntimeError("Timeout waiting for the visual completion signal alert.")
         
-        indd_stem = target_folder_path.name
-        is_valid = file_system.verify_resize_output(indd_stem, config)
+        safe_stem = _safe_stem(Path(target_folder_path).name)
+        is_valid = file_system.verify_resize_output(safe_stem, config)
         
         if is_valid:
             logging.info(f"--- Resize Process and Verification Successful for folder: {target_folder_path.name} ---")
@@ -462,7 +484,6 @@ def run_resize_on_folder(target_folder_path, config):
         if dest_script_path and dest_script_path.exists():
             try: dest_script_path.unlink()
             except OSError as e: logging.warning(f"Could not delete script: {e}")
-
 
 def close_document(config, indd_filename):
     """

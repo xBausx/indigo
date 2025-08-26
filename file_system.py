@@ -1,9 +1,42 @@
 # file_system.py
-import logging
+import logging, re
 import shutil
 import os
 import time
 from pathlib import Path
+
+
+def sanitize_indd_filename(indd_path: Path) -> Path:
+    """
+    Fixes whitespace issues like 'NAME .indd' -> 'NAME.indd'.
+    Trims leading/trailing whitespace and removes whitespace right before the extension.
+    Returns the (possibly renamed) Path.
+    """
+    p = Path(indd_path)
+    name = p.name
+
+    # Remove whitespace immediately before extension and trim ends
+    cleaned = re.sub(r"\s+(\.indd)$", r"\1", name, flags=re.IGNORECASE).strip()
+
+    if cleaned == name:
+        return p  # nothing to do
+
+    # Ensure we don't collide with an existing file
+    ext = p.suffix  # preserve original case of extension
+    stem = Path(cleaned).stem
+    candidate = p.with_name(cleaned)
+    i = 1
+    while candidate.exists():
+        candidate = p.with_name(f"{stem}_{i}{ext}")
+        i += 1
+
+    try:
+        p.rename(candidate)
+        logging.info(f"Sanitized filename: '{name}' -> '{candidate.name}'")
+        return candidate
+    except Exception as e:
+        logging.warning(f"Could not sanitize filename '{name}' -> '{candidate.name}': {e}. Proceeding with original.")
+        return p
 
 def clear_indesign_cache():
     """Finds and deletes InDesign's cache and recovery folders for a fresh start."""
