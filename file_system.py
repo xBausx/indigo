@@ -202,60 +202,58 @@ def cleanup_intermediate_folder(indd_file_stem, request_id, config):
         # Cleanup failure should not cause the entire process to be marked as an error.
         logging.warning(f"[ReqID: {request_id}] An error occurred during intermediate folder cleanup: {e}", exc_info=True)
 
-def copy_then_delete_indesign(source_path, dest_folder_path, request_id,
-                              verify_copy=True, max_tries=10, delay_seconds=1.0, backoff=1.5):
+def copy_then_delete_indesign(source_path, dest_folder_path, request_id, max_retries=5):
     """
-    Copies the source .indd to dest folder. Then tries to delete the source with retries.
-    If the source is locked, we keep retrying a few times; if still locked, we leave it in place.
-    Returns True if copy succeeded (delete may be deferred).
+    Safely 'move' an .indd by copying it first, verifying, then deleting the source.
+    If the source is still locked after several retries, we leave it in place
+    (copy remains in destination) and log a warning.
     """
-    from pathlib import Path
-    import shutil, time, logging
+    import time, stat
 
+    source = Path(source_path)
+    dest_folder = Path(dest_folder_path)
+    dest_folder.mkdir(parents=True, exist_ok=True)
+    dest_file = dest_folder / source.name
+
+    # 1) Copy with retries
+    for attempt in range(1, max_retries + 1):
+        try:
+            shutil.copy2(str(source), str(dest_file))
+            break
+        except Exception as e:
+            logging.warning(f"[ReqID: {request_id}] Copy attempt {attempt}/{max_retries} failed: {e}")
+            time.sleep(2)
+    else:
+        logging.error(f"[ReqID: {request_id}] Copy failed after {max_retries} attempts; aborting.")
+        raise
+
+    # 2) Verify (size check is fast and robust enough here)
     try:
-        source = Path(source_path)
-        dest_folder = Path(dest_folder_path)
-        dest_folder.mkdir(parents=True, exist_ok=True)  # parents=True is important on fresh trees
-        dest = dest_folder / source.name
-
-        shutil.copy2(str(source), str(dest))
-        logging.info(f"[ReqID: {request_id}] Copied '{source.name}' -> '{dest_folder}'.")
-
-        if verify_copy:
-            try:
-                src_size = source.stat().st_size
-                dst_size = dest.stat().st_size
-                if src_size != dst_size:
-                    logging.warning(f"[ReqID: {request_id}] Copy size mismatch (src={src_size}, dst={dst_size}).")
-            except Exception as e:
-                logging.warning(f"[ReqID: {request_id}] Could not verify copy sizes: {e}")
-
-        # Delete with retries (handles lingering file locks)
-        sleep_for = float(delay_seconds)
-        for attempt in range(1, max_tries + 1):
-            try:
-                source.unlink()
-                logging.info(f"[ReqID: {request_id}] Deleted original: {source}")
-                break
-            except PermissionError as e:
-                if attempt == max_tries:
-                    logging.error(f"[ReqID: {request_id}] Still locked after {max_tries} attempts; "
-                                f"leaving original in place: {source} ({e})")
-                else:
-                    logging.warning(f"[ReqID: {request_id}] Delete locked (attempt {attempt}/{max_tries}) for "
-                                    f"'{source.name}'; retrying in {sleep_for:.1f}s")
-                    time.sleep(sleep_for)
-                    sleep_for *= backoff
-            except Exception as e:
-                logging.warning(f"[ReqID: {request_id}] Could not delete source now: {e}")
-                break
-
-        return True
-
+        if source.stat().st_size != dest_file.stat().st_size:
+            raise IOError("Size mismatch after copy (possible partial copy).")
     except Exception as e:
-        logging.error(f"[ReqID: {request_id}] Failed to copy '{source_path}' to '{dest_folder_path}': {e}", exc_info=True)
-        return False
+        logging.error(f"[ReqID: {request_id}] Verification failed after copy: {e}")
+        raise
 
+    # 3) Delete original with retries (file may still be locked briefly)
+    for attempt in range(1, max_retries + 1):
+        try:
+            try:
+                os.chmod(source, stat.S_IWRITE)
+            except Exception:
+                pass
+            source.unlink()
+            logging.info(f"[ReqID: {request_id}] Deleted original file after successful copy.")
+            return True
+        except PermissionError as e:
+            logging.warning(f"[ReqID: {request_id}] Delete attempt {attempt}/{max_retries} blocked by lock: {e}")
+            time.sleep(2)
+        except Exception as e:
+            logging.warning(f"[ReqID: {request_id}] Delete attempt {attempt}/{max_retries} failed: {e}")
+            time.sleep(2)
+
+    logging.warning(f"[ReqID: {request_id}] Could not delete original after copy; leaving source in place to avoid data loss.")
+    return True
 
 def ensure_deleted_after_close(path, request_id, retries=10, delay_seconds=1.0):
     """

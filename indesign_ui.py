@@ -6,6 +6,7 @@ import os
 import pyperclip
 import re
 import stat
+import pywinauto
 from pathlib import Path
 
 import file_system 
@@ -61,6 +62,39 @@ def _rmtree_win(path: Path):
         except Exception:
             pass
     shutil.rmtree(str(path), onerror=_onerror)
+
+def _wait_choose_folder_dialog(timeout=30):
+    """
+    Find the folder chooser dialog robustly across variants:
+    'Choose Folder', 'Select Folder', 'Browse for Folder', etc.
+    Returns a pywinauto WindowSpecification. Raises TimeoutError if not found.
+    """
+    patterns = [
+        r"^Choose Folder$",
+        r"^Select Folder$",
+        r".*Browse.*Folder.*",
+        r".*Folder.*",              # very defensive final fallback
+    ]
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        # Prefer OS/common dialogs (#32770), but don’t require it
+        for pat in patterns:
+            try:
+                dlg = Desktop(backend="win32").window(title_re=pat, class_name="#32770")
+                if dlg.exists(timeout=0.8):
+                    return dlg
+            except Exception:
+                pass
+            try:
+                dlg = Desktop(backend="win32").window(title_re=pat)
+                if dlg.exists(timeout=0.8):
+                    return dlg
+            except Exception:
+                pass
+        time.sleep(0.3)
+
+    raise pywinauto.timings.TimeoutError("Folder chooser dialog not found in time.")
 
 # --- CORE UI FUNCTIONS ---
 def handle_opening_dialogs(app, config):
@@ -125,9 +159,16 @@ def export_html_via_ui(indd_path, config):
         time.sleep(inter_action_wait)
         handle_opening_dialogs(app, config)
         
-        main_window = app.window(title_re=f".*{indd_path.name}.*").wait('visible', timeout=30)
-        main_window.set_focus()
-        main_window.type_keys("^e") # Ctrl+E for Export
+        try:
+            app = Application(backend="win32").connect(title_re=".*InDesign.*")
+        except Exception:
+            pass  # best effort; Desktop() lookup below still works
+
+        doc_title_regex = f".*{re.escape(Path(indd_path).name)}.*"
+        doc_win = Desktop(backend="win32").window(title_re=doc_title_regex)
+        doc_win.wait('visible', timeout=30)
+        doc_win.set_focus()
+        doc_win.type_keys("^e")  # Ctrl+E for Export
         
         export_dialog = app.window(title="Export", class_name="#32770").wait('visible', timeout=15)
         time.sleep(2)
@@ -233,15 +274,44 @@ def export_jpeg_via_ui(indd_path, config):
         logging.error(f"FATAL: Could not ensure output folder '{jpeg_output_dir}'. Error: {e}")
         return False
 
-    # Attach to existing InDesign
+    # Attach robustly: prefer path attach, then handle attach (skip dialogs/Explorer)
     try:
-        app = Application(backend="win32").connect(title_re=".*InDesign.*")
+        app = Application(backend="win32").connect(path=config.get('Paths', 'indesign_executable'))
     except Exception:
-        logging.error("Could not attach to a running InDesign instance. Is HTML export keeping it open?", exc_info=True)
-        return False
+        wins = Desktop(backend="win32").windows(title_re=r".*InDesign.*")
+        # Prefer non-dialog, non-Explorer windows
+        wins = [w for w in wins if w.class_name() not in ("#32770", "CabinetWClass")]
+        if not wins:
+            logging.error("Could not attach to a running InDesign instance. Is HTML export keeping it open?", exc_info=True)
+            return False
+        app = Application(backend="win32").connect(handle=wins[0].handle)
 
-    doc_title_regex = f".*{re.escape(Path(indd_path).name)}.*"
+    # Always define this BEFORE first use to avoid UnboundLocalError
+    doc_name = Path(indd_path).name if not isinstance(indd_path, Path) else indd_path.name
+    doc_title_regex = f".*{re.escape(doc_name)}.*"
     doc_win = None
+
+    # Close Explorer window that HTML export may have opened (best-effort)
+    try:
+        Desktop(backend="win32").window(
+            title_re=f"^{re.escape(doc_stem)}.*", class_name="CabinetWClass"
+        ).wait('visible', timeout=5).close()
+        time.sleep(0.5)
+    except Exception:
+        pass
+
+    # Focus the document: try by exact doc name → generic shell → top window
+    try:
+        doc_win = app.window(title_re=doc_title_regex).wait('visible', timeout=45)
+    except Exception:
+        try:
+            doc_win = app.window(title_re=r".*Adobe InDesign.*").wait('visible', timeout=20)
+        except Exception:
+            doc_win = app.top_window()
+
+    doc_win.set_focus()
+    time.sleep(0.2)
+
 
     try:
         # Close Explorer window that HTML export may have opened
@@ -425,7 +495,7 @@ def run_resize_on_folder(target_folder_path, config):
         
         try:
             
-            attempt = find_and_click_image(RESIZE_ALL_SCRIPT, confidence=0.9, retries=2, type="double")
+            attempt = find_and_click_image(RESIZE_ALL_SCRIPT, confidence=0.9, type="double")
             
             if not attempt:
                 logging.info("'resizeall' script not found via image; attempting Users folder navigation...")
@@ -497,8 +567,13 @@ def close_document(config, indd_filename):
 
     logging.info(f"Closing document '{indd_filename}' to release file lock...")
     try:
-        app = Application(backend="win32").connect(title_re=".*InDesign.*")
-        
+        try:
+            app = Application(backend="win32").connect(path=config.get('Paths', 'indesign_executable'))
+        except Exception:
+            wins = Desktop(backend="win32").windows(title_re=r".*InDesign.*")
+            wins = [w for w in wins if w.class_name() not in ("#32770", "CabinetWClass")]
+            app = Application(backend="win32").connect(handle=wins[0].handle)
+            
         # Use a specific regex for the window title to ensure we have the right one
         doc_title_regex = f".*{re.escape(Path(indd_filename).name)}.*"
         main_window = app.window(title_re=doc_title_regex).wait('visible', timeout=30)
@@ -549,3 +624,140 @@ def open_indd_only(indd_path, config):
     except Exception as e:
         logging.error(f"open_indd_only failed for '{indd_path}': {e}", exc_info=True)
         return False
+    
+def kill_indesign_if_running(config):
+    """Best-effort: kill InDesign if it is running."""
+    try:
+        app = Application(backend="win32").connect(path=config.get('Paths', 'indesign_executable'))
+        if app and app.is_process_running():
+            app.kill()
+            time.sleep(1.0)
+            return True
+    except Exception:
+        # try handle-based fallback
+        try:
+            wins = Desktop(backend="win32").windows(title_re=r".*InDesign.*")
+            for w in wins:
+                try:
+                    Application(backend="win32").connect(handle=w.handle).kill()
+                    time.sleep(0.5)
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    return False
+
+def run_resize_on_folder_keep_session(target_folder_path, config):
+    """
+    Attach to the already-open InDesign session and run the resize script.
+    Keeps InDesign OPEN after finishing (Hybrid mode).
+    """
+    project_root = Path().resolve()
+    scripts_folder = project_root / config.get('Paths', 'scripts_folder')
+    indesign_version_folder = config.get('Paths', 'indesign_version_folder')
+    images_root = project_root / config.get('Paths', 'image_assets_folder')
+
+    USER_SCRIPTS_FOLDER  = str(images_root / config.get('ImageFiles', 'user_scripts_folder'))
+    RESIZE_ALL_SCRIPT    = str(images_root / config.get('ImageFiles', 'resize_all_script'))
+    SIGNAL_OK_BUTTON     = str(images_root / config.get('ImageFiles', 'signal_ok_button'))
+
+    inter_action_wait = config.getint('Settings', 'inter_action_wait')
+    process_timeout   = config.getint('Settings', 'process_timeout')
+
+    logging.info(f"--- Starting Resize (keep session) for folder: {target_folder_path} ---")
+
+    source_script_path = scripts_folder / "resizeall.js"
+    dest_script_path = None
+    app = None
+
+    try:
+        # Ensure script is in User Scripts Panel
+        appdata_path = Path(os.getenv('APPDATA'))
+        dest_script_folder = appdata_path / "Adobe" / "InDesign" / indesign_version_folder / "en_US" / "Scripts" / "Scripts Panel"
+        dest_script_folder.mkdir(parents=True, exist_ok=True)
+        dest_script_path = dest_script_folder / source_script_path.name
+        try:
+            shutil.copy2(source_script_path, dest_script_path)
+        except Exception:
+            pass  # already there is fine
+
+        # Attach to running InDesign (no fresh launch)
+        try:
+            app = Application(backend="win32").connect(path=config.get('Paths', 'indesign_executable'))
+        except Exception:
+            wins = Desktop(backend="win32").windows(title_re=r".*InDesign.*")
+            if not wins:
+                logging.error("Could not attach to a running InDesign instance for resize (keep session).")
+                return False
+            # prefer non-dialog windows
+            wins = [w for w in wins if w.class_name() not in ("#32770", "CabinetWClass")]
+            app = Application(backend="win32").connect(handle=wins[0].handle)
+
+        # Open Scripts Panel
+        main_window = app.window(title_re=r".*Adobe InDesign.*")
+        if not main_window.exists(timeout=10):
+            main_window = app.top_window()
+        main_window.set_focus()
+        main_window.type_keys("^%{F11}")
+        time.sleep(inter_action_wait)
+
+        # Image-driven: open User folder, then double-click resize script
+        resize_all_found = str(images_root / config.get('ImageFiles', 'user_scripts_folder'))
+        if not resize_all_found:
+            logging.info(f"--- 'resizeall' script not found, looking for 'User folder' ---")
+            user_folder_found = find_and_click_image(USER_SCRIPTS_FOLDER, confidence=0.9, description="'User' folder")
+            if user_folder_found:
+                loc = pyautogui.locateCenterOnScreen(USER_SCRIPTS_FOLDER, confidence=0.9)
+                if loc: pyautogui.doubleClick(loc)
+                time.sleep(2)
+                final_resize_found = find_and_click_image(RESIZE_ALL_SCRIPT, confidence=0.9, description="'resizeall' script")
+                if final_resize_found:
+                    loc = pyautogui.locateCenterOnScreen(RESIZE_ALL_SCRIPT, confidence=0.9)
+                    if loc: pyautogui.doubleClick(loc)
+                else:
+                    raise RuntimeError("Could not find 'resizeall' script after expanding 'User' folder.")
+            else:
+                raise RuntimeError("Could not find 'User' folder in the Scripts Panel.")
+            
+
+        # Choose folder
+        choose_folder_dialog = _wait_choose_folder_dialog(timeout=30)
+        choose_folder_dialog.set_focus()
+        folder_for_resize = str(Path(target_folder_path).resolve())
+        choose_folder_dialog.type_keys("{TAB}")
+        pyperclip.copy(folder_for_resize)
+        choose_folder_dialog.type_keys("^v{ENTER}")
+
+        logging.info("Resize script is running. Waiting for visual completion signal...")
+
+        start_time = time.time()
+        signal_found = False
+        while time.time() - start_time < process_timeout:
+            if find_and_click_image(SIGNAL_OK_BUTTON, confidence=0.9, retries=1, description="completion signal OK"):
+                signal_found = True
+                break
+            time.sleep(5)
+
+        if not signal_found:
+            raise RuntimeError("Timeout waiting for the visual completion signal alert.")
+
+        indd_stem = Path(target_folder_path).name
+        is_valid = file_system.verify_resize_output(indd_stem, config)
+        if not is_valid:
+            raise RuntimeError(f"Artifact validation failed for folder: {indd_stem}")
+
+        logging.info(f"--- Resize OK (keep session) for folder: {indd_stem} ---")
+        return True
+
+    except Exception as e:
+        logging.error(f"An error occurred during the resize phase (keep session): {e}", exc_info=True)
+        return False
+    finally:
+        # IMPORTANT: do NOT kill the app (Hybrid keeps it warm)
+        if dest_script_path and dest_script_path.exists():
+            try:
+                dest_script_path.unlink()
+            except OSError as e:
+                logging.warning(f"Could not delete script: {e}")
+

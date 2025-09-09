@@ -1,4 +1,6 @@
 # orchestrator.py
+import json
+from datetime import datetime, timedelta
 import logging
 import configparser
 import time
@@ -59,6 +61,49 @@ def setup_logging_for_file(config, log_file_name, request_id):
         ]
     )
     logging.info(f"Logging for Request ID {request_id} will be in: {file_log_path}")
+    
+def _warm_cfg(config):
+    s = config['WarmSession'] if config.has_section('WarmSession') else {}
+    return {
+        "enabled": s.get('enabled', 'false').lower() == 'true',
+        "max_files": int(s.get('max_files_per_session', 5)),
+        "max_minutes": int(s.get('max_session_minutes', 45)),
+        "fail_restart": int(s.get('consecutive_fail_restart', 2)),
+    }
+
+def _ledger_path(project_root):
+    logs = project_root / '6_Logs'
+    logs.mkdir(exist_ok=True)
+    return logs / 'warm_session.json'
+
+def _load_ledger(project_root):
+    p = _ledger_path(project_root)
+    if not p.exists():
+        return {"started_at": None, "files_done": 0, "consecutive_failures": 0}
+    try:
+        return json.loads(p.read_text(encoding='utf-8'))
+    except Exception:
+        return {"started_at": None, "files_done": 0, "consecutive_failures": 0}
+
+def _save_ledger(project_root, data):
+    _ledger_path(project_root).write_text(json.dumps(data), encoding='utf-8')
+
+def _ledger_new():
+    return {
+        "started_at": datetime.utcnow().isoformat(),
+        "files_done": 0,
+        "consecutive_failures": 0
+    }
+
+def _ledger_age_minutes(ledger):
+    try:
+        if not ledger.get("started_at"):
+            return 0
+        started = datetime.fromisoformat(ledger["started_at"])
+        return max(0, int((datetime.utcnow() - started).total_seconds() // 60))
+    except Exception:
+        return 0
+
 
 def _safe_stem(indd_path):
     """Normalize the folder name derived from the INDD file name."""
@@ -85,8 +130,20 @@ def main():
     project_root = Path().resolve()
     config = configparser.ConfigParser()
     config.read(project_root / 'config.ini')
+    
+    warm = _warm_cfg(config)
+    ledger = _load_ledger(project_root)
+    if warm["enabled"] and not ledger.get("started_at"):
+        ledger = _ledger_new()
+        _save_ledger(project_root, ledger)
+
 
     setup_logging_for_file(config, indd_file_path.stem, request_id)
+    
+    if (not warm["enabled"]) or ledger.get("files_done", 0) == 0:
+        indesign_ui.kill_indesign_if_running(config)
+        file_system.clear_indesign_cache()
+        time.sleep(1)
     
     processed_folder = project_root / config.get('Paths', 'processed_folder')
     error_folder = project_root / config.get('Paths', 'error_folder')
@@ -119,10 +176,13 @@ def main():
             logging.warning(f"[ReqID: {request_id}] Stage 2 failed after {max_retries} attempts; restarting InDesign and retrying Stage 2...")
             _kill_indesign_safely()
             app_is_running = False
+            file_system.clear_indesign_cache()
+            time.sleep(1)
 
             # Reopen the same document WITHOUT redoing HTML export
             if not indesign_ui.open_indd_only(indd_file_path, config):
                 raise RuntimeError(f"Stage 2 restart: could not reopen document.")
+
 
             app_is_running = True
 
@@ -152,18 +212,39 @@ def main():
             safe_processed.mkdir(parents=True, exist_ok=True)
             processed_subfolder = safe_processed
 
-        # Use the original, clean move function. The lock is gone.
-        file_system.move_file_to_folder(indd_file_path, processed_subfolder)
+        # Prefer copy-then-delete to avoid sporadic lock errors
+        file_system.copy_then_delete_indesign(indd_file_path, processed_subfolder, request_id)
+
 
         # --- STAGE 5: RESIZE PROCESS AND FINAL CLOSE ---
-        logging.info(f"[ReqID: {request_id}] Starting Stage 5: Resize Script...")
-        resize_ok = _attempt_with_retries("Stage 5: Resize Script", indesign_ui.run_resize_on_folder,
-                                (processed_subfolder, config), max_retries, retry_delay, request_id)
+        resize_ok = _attempt_with_retries(
+            "Stage 5: Resize Script",
+            indesign_ui.run_resize_on_folder_keep_session,
+            (processed_subfolder, config),
+            max_retries,
+            retry_delay,
+            request_id
+        )
         # run_resize_on_folder launches/kills its own app instance; after it returns, app shouldn't be running
         app_is_running = False
 
         if resize_ok:
             logging.info(f"[ReqID: {request_id}] Successfully processed and resized {indd_file_path.name}.")
+            
+            if warm["enabled"]:
+                # Success resets consecutive failures
+                ledger["consecutive_failures"] = 0
+                # Count this file
+                ledger["files_done"] = int(ledger.get("files_done", 0)) + 1
+                age = _ledger_age_minutes(ledger)
+                logging.info(f"[Warm] files_done={ledger['files_done']} age(min)={age}")
+
+                # Restart if thresholds hit
+                if ledger["files_done"] >= warm["max_files"] or age >= warm["max_minutes"]:
+                    logging.info("[Warm] Session limit reached; restarting InDesign.")
+                    indesign_ui.kill_indesign_if_running(config)
+                    ledger = _ledger_new()
+                _save_ledger(project_root, ledger)
             
             # Read page count written by resizeall.js
             safe_stem = _safe_stem(indd_file_path)
@@ -177,12 +258,21 @@ def main():
             else:
                 logging.warning(f"[SUMMARY] [ReqID: {request_id}] Process complete, but the final API callback FAILED.")
         else:
+            if warm["enabled"]:
+                ledger["consecutive_failures"] = int(ledger.get("consecutive_failures", 0)) + 1
+                logging.info(f"[Warm] consecutive_failures={ledger['consecutive_failures']}")
+                if ledger["consecutive_failures"] >= warm["fail_restart"]:
+                    logging.info("[Warm] Failure threshold reached; restarting InDesign.")
+                    indesign_ui.kill_indesign_if_running(config)
+                    ledger = _ledger_new()
+                _save_ledger(project_root, ledger)
+                
             raise RuntimeError(f"Stage 5: run_resize_on_folder failed after {max_retries} attempts.")
 
     except Exception as e:
         logging.error(f"[ReqID: {request_id}] A critical error occurred: {e}", exc_info=True)
-        
-        # notify failure with status
+
+        # Best-effort: notify failure (don't block if this fails)
         try:
             safe_stem = _safe_stem(indd_file_path)
             api_client.send_completion_callback(
@@ -195,16 +285,43 @@ def main():
             )
         except Exception:
             pass
-        
-        # Graceful error handling
-        if app_is_running:
-            try: Application(backend="win32").connect(title_re=".*InDesign.*").kill()
-            except Exception: pass
-        
-        if indd_file_path.exists():
-            file_system.move_file_to_folder(indd_file_path, error_folder)
-        elif 'processed_subfolder' in locals() and processed_subfolder.exists():
-            file_system.move_file_to_folder(processed_subfolder, error_folder)
+
+        # 1) Try to close just the document to release the .indd lock
+        try:
+            indesign_ui.close_document(config, indd_file_path.name)
+            time.sleep(1.0)
+        except Exception:
+            pass
+
+        # 2) As a fallback, kill InDesign so no handles remain
+        try:
+            _kill_indesign_safely()
+            time.sleep(1.0)
+        except Exception:
+            pass
+
+        # 3) Now move the file/folder to Errors with a few retries
+        moved = False
+        for attempt in range(1, 4):
+            try:
+                if indd_file_path.exists():
+                    file_system.move_file_to_folder(indd_file_path, error_folder)
+                    moved = True
+                    break
+                elif 'processed_subfolder' in locals() and processed_subfolder.exists():
+                    file_system.move_file_to_folder(processed_subfolder, error_folder)
+                    moved = True
+                    break
+                else:
+                    moved = True  # nothing to move
+                    break
+            except Exception as move_err:
+                logging.warning(f"[ReqID: {request_id}] Move-to-error attempt {attempt}/3 failed: {move_err}")
+                time.sleep(2)
+
+        if not moved:
+            logging.error(f"[ReqID: {request_id}] FINAL: Could not move to Errors; leaving in place to avoid data loss.")
+
         sys.exit(1)
 
     logging.info(f"Indigo Worker finished successfully for Request ID: {request_id}.")

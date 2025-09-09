@@ -4,7 +4,7 @@
 // --- CONFIGURATION ---
 var SCALE_FACTOR = 8;
 // UPDATED output path as per new requirement.
-var OUTPUT_ROOT_PATH = "C:/Users/Admin/Documents/nctv-repositories/html-flyers-static/flyers";
+var OUTPUT_ROOT_PATH = "C:/Users/Rico/Documents/nctv-repositories/html-flyers-static/flyers";
 var exportedImages = []; // Global array to store info for the HTML gallery.
 
 // --- MAIN FUNCTION ---
