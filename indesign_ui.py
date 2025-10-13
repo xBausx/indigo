@@ -69,6 +69,11 @@ def handle_opening_dialogs(app, config):
     images_root = project_root / config.get('Paths', 'image_assets_folder')
     OK_BUTTON = str(images_root / config.get('ImageFiles', 'ok_button'))
     SKIP_FONTS_BUTTON = str(images_root / config.get('ImageFiles', 'skip_fonts_button'))
+    DAMAGED_OK_BUTTON = str(images_root / config.get('ImageFiles', 'damaged_ok_button'))
+    
+    # Handle the "may be damaged" warning (OK / Cancel). We choose OK.
+    logging.info("UI Automation: Watching for 'May be damaged' warning...")
+    find_and_click_image(DAMAGED_OK_BUTTON, confidence=0.9, description="'Damaged file' OK button")
 
     logging.info("UI Automation: Watching for 'Missing Links' dialog...")
     # This now uses the new default of 5 retries, 5 seconds.
